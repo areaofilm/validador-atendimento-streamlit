@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Validador de Atendimento WhatsApp</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Qualidade de atendimento</p>
+            <h1>Validador de automações WhatsApp</h1>
+          </div>
+          <div class="topbar-actions">
+            <button class="ghost-button" id="clearAllButton" type="button" title="Limpar todos os dados">
+              Limpar
+            </button>
+            <button class="primary-button" id="printButton" type="button" title="Imprimir ou salvar PDF">
+              Relatório
+            </button>
+          </div>
+        </header>
+
+        <section class="summary-grid" aria-label="Resumo dos testes">
+          <article class="metric">
+            <span>Total</span>
+            <strong id="totalTests">0</strong>
+          </article>
+          <article class="metric success">
+            <span>Conformes</span>
+            <strong id="conformTests">0</strong>
+          </article>
+          <article class="metric danger">
+            <span>Não conformes</span>
+            <strong id="nonConformTests">0</strong>
+          </article>
+          <article class="metric accent">
+            <span>Conformidade</span>
+            <strong id="conformityRate">0%</strong>
+          </article>
+        </section>
+
+        <section class="panel">
+          <h2>Dados da bateria</h2>
+          <div class="form-grid">
+            <label>
+              Nome da bateria
+              <input id="auditName" type="text" placeholder="Ex.: Teste fluxo suporte WhatsApp" />
+            </label>
+            <label>
+              Canal / número testado
+              <input id="channel" type="text" placeholder="Ex.: WhatsApp SAC - 0800 / número oficial" />
+            </label>
+            <label>
+              Responsável
+              <input id="auditor" type="text" placeholder="Seu nome" />
+            </label>
+            <label>
+              Data
+              <input id="auditDate" type="date" />
+            </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <h2>Novo teste</h2>
+              <p>Registre o que será validado, o resultado esperado e depois marque o resultado real.</p>
+            </div>
+          </div>
+          <form id="testForm" class="test-form">
+            <label>
+              O que vou testar
+              <input id="testTitle" type="text" placeholder="Ex.: Segunda via de boleto" required />
+            </label>
+            <label>
+              Mensagem enviada / cenário
+              <textarea id="scenario" rows="3" placeholder="Ex.: Cliente pergunta: Quero minha segunda via"></textarea>
+            </label>
+            <label>
+              Resposta esperada da automação
+              <textarea id="expected" rows="3" placeholder="Ex.: Bot identifica o cliente e oferece link da segunda via"></textarea>
+            </label>
+            <label>
+              Observações
+              <textarea id="notes" rows="3" placeholder="Anote evidências, prints, horários, falhas ou pontos de melhoria"></textarea>
+            </label>
+            <div class="form-footer">
+              <fieldset class="status-picker">
+                <legend>Resultado</legend>
+                <label class="radio-pill">
+                  <input type="radio" name="status" value="conforme" checked />
+                  Conforme
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="status" value="nao-conforme" />
+                  Não conforme
+                </label>
+                <label class="radio-pill">
+                  <input type="radio" name="status" value="pendente" />
+                  Pendente
+                </label>
+              </fieldset>
+              <button class="primary-button" type="submit">Adicionar teste</button>
+            </div>
+          </form>
+        </section>
+      </section>
+
+      <aside class="report-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Evidências</p>
+            <h2>Testes realizados</h2>
+          </div>
+          <button class="ghost-button" id="exportCsvButton" type="button">CSV</button>
+        </div>
+        <div class="report-meta" id="reportMeta"></div>
+        <div id="emptyState" class="empty-state">
+          Nenhum teste cadastrado ainda.
+        </div>
+        <div id="testsList" class="tests-list" aria-live="polite"></div>
+      </aside>
+    </main>
+
+    <template id="testItemTemplate">
+      <article class="test-item">
+        <div class="test-item-header">
+          <div>
+            <p class="test-index"></p>
+            <h3></h3>
+          </div>
+          <span class="status-badge"></span>
+        </div>
+        <dl>
+          <div>
+            <dt>Cenário</dt>
+            <dd class="scenario-text"></dd>
+          </div>
+          <div>
+            <dt>Esperado</dt>
+            <dd class="expected-text"></dd>
+          </div>
+          <div>
+            <dt>Observações</dt>
+            <dd class="notes-text"></dd>
+          </div>
+        </dl>
+        <div class="item-actions">
+          <button class="ghost-button edit-button" type="button">Editar</button>
+          <button class="danger-button delete-button" type="button">Excluir</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>
