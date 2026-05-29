@@ -4,12 +4,14 @@ Aplicativo Streamlit para registrar testes de automações de atendimento, marca
 
 ## Acesso
 
-O app lê as credenciais pelos secrets do Streamlit:
+O app lê o usuário e a senha inicial pelos secrets do Streamlit:
 
 ```toml
 APP_USERNAME = "Valenet"
 APP_PASSWORD = "Valenet2026"
 ```
+
+A senha inicial é provisória. No primeiro acesso, o app exige a troca e passa a validar a nova senha por hash salvo em `.streamlit_runtime/auth.json`.
 
 O arquivo local `.streamlit/secrets.toml` não deve ser enviado ao GitHub.
 

@@ -2,16 +2,24 @@ from __future__ import annotations
 
 from datetime import date
 from io import StringIO
+from pathlib import Path
 import csv
+import hashlib
+import hmac
+import json
 import os
 import uuid
 
 import streamlit as st
 
 
+AUTH_FILE = Path(".streamlit_runtime/auth.json")
+PBKDF2_ITERATIONS = 390_000
+
+
 st.set_page_config(
     page_title="Validador WhatsApp",
-    page_icon="✅",
+    page_icon="OK",
     layout="wide",
 )
 
@@ -22,9 +30,64 @@ def get_credentials() -> tuple[str, str]:
     return username, password
 
 
+def hash_password(password: str, salt: str | None = None) -> str:
+    salt = salt or uuid.uuid4().hex
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    ).hex()
+    return f"{salt}${digest}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        salt, expected_digest = password_hash.split("$", 1)
+    except ValueError:
+        return False
+
+    candidate = hash_password(password, salt).split("$", 1)[1]
+    return hmac.compare_digest(candidate, expected_digest)
+
+
+def load_auth_record() -> dict[str, str] | None:
+    if not AUTH_FILE.exists():
+        return None
+
+    try:
+        return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_new_password(password: str) -> None:
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    AUTH_FILE.write_text(
+        json.dumps({"password_hash": hash_password(password)}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def validate_login(username: str, password: str) -> tuple[bool, bool]:
+    expected_username, initial_password = get_credentials()
+    if username != expected_username:
+        return False, False
+
+    auth_record = load_auth_record()
+    if auth_record and verify_password(password, auth_record.get("password_hash", "")):
+        return True, False
+
+    if not auth_record and password == initial_password:
+        return True, True
+
+    return False, False
+
+
 def init_state() -> None:
     defaults = {
         "authenticated": False,
+        "pending_password_change": False,
         "tests": [],
         "audit_name": "",
         "channel": "",
@@ -66,7 +129,13 @@ def login_screen() -> None:
             submitted = st.form_submit_button("Entrar", use_container_width=True)
 
         if submitted:
-            if username == expected_username and password == expected_password:
+            valid_login, must_change_password = validate_login(username, password)
+            if valid_login and must_change_password:
+                st.session_state.pending_password_change = True
+                st.session_state.authenticated = False
+                st.rerun()
+            elif valid_login:
+                st.session_state.pending_password_change = False
                 st.session_state.authenticated = True
                 st.rerun()
             else:
@@ -74,6 +143,40 @@ def login_screen() -> None:
 
         if not expected_username or not expected_password:
             st.warning("Configure APP_USERNAME e APP_PASSWORD nos secrets do Streamlit.")
+
+
+def password_change_screen() -> None:
+    _, initial_password = get_credentials()
+
+    with st.container(border=True):
+        st.title("Trocar senha")
+        st.caption("A senha inicial é provisória. Cadastre uma nova senha para liberar o app.")
+
+        with st.form("change_password_form"):
+            new_password = st.text_input("Nova senha", type="password")
+            confirm_password = st.text_input("Confirmar nova senha", type="password")
+            submitted = st.form_submit_button("Salvar nova senha", use_container_width=True)
+
+        if not submitted:
+            return
+
+        if len(new_password) < 8:
+            st.error("A nova senha precisa ter pelo menos 8 caracteres.")
+            return
+
+        if new_password == initial_password:
+            st.error("A nova senha deve ser diferente da senha provisória.")
+            return
+
+        if new_password != confirm_password:
+            st.error("A confirmação não confere com a nova senha.")
+            return
+
+        save_new_password(new_password)
+        st.session_state.pending_password_change = False
+        st.session_state.authenticated = True
+        st.success("Senha alterada com sucesso.")
+        st.rerun()
 
 
 def status_label(status: str) -> str:
@@ -193,6 +296,7 @@ def render_header() -> None:
     with right:
         if st.button("Sair", use_container_width=True):
             st.session_state.authenticated = False
+            st.session_state.pending_password_change = False
             st.rerun()
 
 
@@ -321,6 +425,10 @@ def render_report() -> None:
 
 def main() -> None:
     init_state()
+
+    if st.session_state.pending_password_change:
+        password_change_screen()
+        return
 
     if not st.session_state.authenticated:
         login_screen()
