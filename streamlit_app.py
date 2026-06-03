@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime
 from datetime import date
 from html import escape
 from io import BytesIO, StringIO
 from pathlib import Path
+import base64
 import csv
 import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import uuid
 
 import streamlit as st
@@ -32,7 +35,8 @@ from reportlab.platypus import (
 )
 
 
-AUTH_FILE = Path(".streamlit_runtime/auth.json")
+RUNTIME_DIR = Path(".streamlit_runtime")
+DB_PATH = RUNTIME_DIR / "validador.db"
 PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
 
@@ -71,22 +75,82 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(candidate, expected_digest)
 
 
-def load_auth_record() -> dict[str, str] | None:
-    if not AUTH_FILE.exists():
-        return None
-
-    try:
-        return json.loads(AUTH_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+def get_connection() -> sqlite3.Connection:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
-def save_new_password(password: str) -> None:
-    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    AUTH_FILE.write_text(
-        json.dumps({"password_hash": hash_password(password)}, indent=2),
-        encoding="utf-8",
-    )
+def initialize_database() -> None:
+    expected_username, initial_password = get_credentials()
+    with get_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                must_change_password INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_reports (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                audit_name TEXT,
+                channel TEXT,
+                auditor TEXT,
+                audit_date TEXT,
+                tests_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(username) REFERENCES users(username)
+            )
+            """
+        )
+
+        if expected_username and initial_password:
+            existing = connection.execute(
+                "SELECT username FROM users WHERE username = ?",
+                (expected_username,),
+            ).fetchone()
+            if existing is None:
+                now = datetime.now().isoformat(timespec="seconds")
+                connection.execute(
+                    """
+                    INSERT INTO users (
+                        username, password_hash, must_change_password, created_at, updated_at
+                    )
+                    VALUES (?, ?, 1, ?, ?)
+                    """,
+                    (expected_username, hash_password(initial_password), now, now),
+                )
+
+
+def get_user(username: str) -> sqlite3.Row | None:
+    initialize_database()
+    with get_connection() as connection:
+        return connection.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+
+
+def save_new_password(username: str, password: str) -> None:
+    initialize_database()
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, must_change_password = 0, updated_at = ?
+            WHERE username = ?
+            """,
+            (hash_password(password), now, username),
+        )
 
 
 def validate_login(username: str, password: str) -> tuple[bool, bool]:
@@ -94,20 +158,35 @@ def validate_login(username: str, password: str) -> tuple[bool, bool]:
     if username != expected_username:
         return False, False
 
-    auth_record = load_auth_record()
-    if auth_record and verify_password(password, auth_record.get("password_hash", "")):
-        return True, False
+    user = get_user(username)
+    if not user:
+        return False, False
 
-    if not auth_record and password == initial_password:
+    if not verify_password(password, user["password_hash"]):
+        return False, False
+
+    if user["must_change_password"] or password == initial_password:
         return True, True
 
-    return False, False
+    return True, False
+
+
+def verify_current_password(password: str) -> bool:
+    username = st.session_state.get("current_user")
+    if not username:
+        return False
+
+    user = get_user(username)
+    return bool(user and verify_password(password, user["password_hash"]))
 
 
 def init_state() -> None:
+    initialize_database()
     defaults = {
         "authenticated": False,
         "pending_password_change": False,
+        "current_user": "",
+        "login_username": "",
         "tests": [],
         "audit_name": "",
         "channel": "",
@@ -152,10 +231,13 @@ def login_screen() -> None:
         if submitted:
             valid_login, must_change_password = validate_login(username, password)
             if valid_login and must_change_password:
+                st.session_state.login_username = username
                 st.session_state.pending_password_change = True
                 st.session_state.authenticated = False
                 st.rerun()
             elif valid_login:
+                st.session_state.current_user = username
+                st.session_state.login_username = ""
                 st.session_state.pending_password_change = False
                 st.session_state.authenticated = True
                 st.rerun()
@@ -168,6 +250,7 @@ def login_screen() -> None:
 
 def password_change_screen() -> None:
     _, initial_password = get_credentials()
+    username = st.session_state.get("login_username")
 
     with st.container(border=True):
         st.title("Trocar senha")
@@ -193,7 +276,14 @@ def password_change_screen() -> None:
             st.error("A confirmação não confere com a nova senha.")
             return
 
-        save_new_password(new_password)
+        if not username:
+            st.error("Sessão de troca de senha expirada. Faça login novamente.")
+            st.session_state.pending_password_change = False
+            return
+
+        save_new_password(username, new_password)
+        st.session_state.current_user = username
+        st.session_state.login_username = ""
         st.session_state.pending_password_change = False
         st.session_state.authenticated = True
         st.success("Senha alterada com sucesso.")
@@ -256,6 +346,115 @@ def make_csv() -> str:
         )
 
     return output.getvalue()
+
+
+def serialize_tests(tests: list[dict[str, object]]) -> str:
+    serializable_tests = []
+    for test in tests:
+        serializable = dict(test)
+        serializable["attachments"] = [
+            {
+                "name": attachment["name"],
+                "type": attachment["type"],
+                "data": base64.b64encode(attachment["data"]).decode("ascii"),
+            }
+            for attachment in test.get("attachments", [])
+        ]
+        serializable_tests.append(serializable)
+    return json.dumps(serializable_tests, ensure_ascii=False)
+
+
+def deserialize_tests(tests_json: str) -> list[dict[str, object]]:
+    tests = json.loads(tests_json)
+    for test in tests:
+        test["attachments"] = [
+            {
+                "name": attachment["name"],
+                "type": attachment["type"],
+                "data": base64.b64decode(attachment["data"]),
+            }
+            for attachment in test.get("attachments", [])
+        ]
+    return tests
+
+
+def save_current_report_snapshot() -> None:
+    username = st.session_state.get("current_user")
+    if not username:
+        st.error("Faça login novamente para salvar o relatório.")
+        return
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO saved_reports (
+                id, username, audit_name, channel, auditor, audit_date, tests_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                username,
+                st.session_state.audit_name,
+                st.session_state.channel,
+                st.session_state.auditor,
+                st.session_state.audit_date.isoformat(),
+                serialize_tests(st.session_state.tests),
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+    st.success("Relatório salvo no banco local.")
+
+
+def list_saved_reports() -> list[sqlite3.Row]:
+    username = st.session_state.get("current_user")
+    if not username:
+        return []
+
+    with get_connection() as connection:
+        return connection.execute(
+            """
+            SELECT *
+            FROM saved_reports
+            WHERE username = ?
+            ORDER BY created_at DESC
+            """,
+            (username,),
+        ).fetchall()
+
+
+def load_saved_report(report_id: str) -> None:
+    username = st.session_state.get("current_user")
+    with get_connection() as connection:
+        report = connection.execute(
+            """
+            SELECT *
+            FROM saved_reports
+            WHERE id = ? AND username = ?
+            """,
+            (report_id, username),
+        ).fetchone()
+
+    if not report:
+        st.error("Relatório salvo não encontrado.")
+        return
+
+    st.session_state.audit_name = report["audit_name"] or ""
+    st.session_state.channel = report["channel"] or ""
+    st.session_state.auditor = report["auditor"] or ""
+    st.session_state.audit_date = date.fromisoformat(report["audit_date"])
+    st.session_state.tests = deserialize_tests(report["tests_json"])
+    st.success("Relatório carregado para a tela.")
+
+
+def clear_saved_reports() -> None:
+    username = st.session_state.get("current_user")
+    with get_connection() as connection:
+        connection.execute(
+            "DELETE FROM saved_reports WHERE username = ?",
+            (username,),
+        )
+    st.success("Relatórios salvos foram limpos do banco local.")
 
 
 def report_base_name() -> str:
@@ -662,6 +861,8 @@ def render_header() -> None:
         if st.button("Sair", use_container_width=True):
             st.session_state.authenticated = False
             st.session_state.pending_password_change = False
+            st.session_state.current_user = ""
+            st.session_state.login_username = ""
             st.rerun()
 
 
@@ -805,6 +1006,14 @@ def render_report() -> None:
             disabled=not st.session_state.tests,
         )
 
+    st.button(
+        "Salvar relatório no banco local",
+        type="primary",
+        use_container_width=True,
+        disabled=not st.session_state.tests,
+        on_click=save_current_report_snapshot,
+    )
+
     if not st.session_state.tests:
         st.info("Nenhum teste cadastrado ainda.")
         return
@@ -852,6 +1061,45 @@ def render_report() -> None:
                 )
 
 
+def render_saved_reports() -> None:
+    st.subheader("Relatórios salvos localmente")
+    reports = list_saved_reports()
+
+    if not reports:
+        st.info("Nenhum relatório salvo no banco local.")
+        return
+
+    st.caption(f"{len(reports)} relatório(s) salvo(s) para o usuário logado.")
+    for report in reports:
+        with st.container(border=True):
+            created_at = datetime.fromisoformat(report["created_at"]).strftime("%d/%m/%Y %H:%M")
+            st.markdown(
+                f"**{report['audit_name'] or 'Sem nome'}**  \n"
+                f"Canal: {report['channel'] or 'Não informado'}  \n"
+                f"Data do teste: {date.fromisoformat(report['audit_date']).strftime('%d/%m/%Y')}  \n"
+                f"Salvo em: {created_at}"
+            )
+            st.button(
+                "Carregar este relatório",
+                key=f"load_saved_{report['id']}",
+                use_container_width=True,
+                on_click=load_saved_report,
+                args=(report["id"],),
+            )
+
+    with st.form("clear_saved_reports_form"):
+        st.warning("Para limpar os relatórios salvos, confirme sua senha atual.")
+        password = st.text_input("Senha para limpar relatórios salvos", type="password")
+        submitted = st.form_submit_button("Limpar relatórios salvos", use_container_width=True)
+
+    if submitted:
+        if verify_current_password(password):
+            clear_saved_reports()
+            st.rerun()
+        else:
+            st.error("Senha inválida. Nada foi apagado.")
+
+
 def main() -> None:
     init_state()
 
@@ -875,6 +1123,9 @@ def main() -> None:
         render_test_form()
     with right:
         render_report()
+
+    st.divider()
+    render_saved_reports()
 
 
 if __name__ == "__main__":
