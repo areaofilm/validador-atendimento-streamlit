@@ -457,6 +457,20 @@ def clear_saved_reports() -> None:
     st.success("Relatórios salvos foram limpos do banco local.")
 
 
+def database_status() -> dict[str, object]:
+    initialize_database()
+    with get_connection() as connection:
+        users = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
+        reports = connection.execute("SELECT COUNT(*) AS total FROM saved_reports").fetchone()["total"]
+
+    return {
+        "installed": DB_PATH.exists(),
+        "path": str(DB_PATH.resolve()),
+        "users": users,
+        "reports": reports,
+    }
+
+
 def report_base_name() -> str:
     raw_name = st.session_state.audit_name or "testes-whatsapp"
     safe_name = "".join(
@@ -1062,30 +1076,41 @@ def render_report() -> None:
 
 
 def render_saved_reports() -> None:
+    st.subheader("Banco local")
+    status = database_status()
+    status_cols = st.columns([0.25, 0.25, 0.5])
+    status_cols[0].metric("Status", "Instalado" if status["installed"] else "Pendente")
+    status_cols[1].metric("Relatórios salvos", status["reports"])
+    status_cols[2].code(status["path"], language="text")
+
+    if st.button("Instalar / verificar banco local", use_container_width=True):
+        initialize_database()
+        st.success("Banco local instalado e verificado com sucesso.")
+        st.rerun()
+
     st.subheader("Relatórios salvos localmente")
     reports = list_saved_reports()
 
     if not reports:
         st.info("Nenhum relatório salvo no banco local.")
-        return
-
-    st.caption(f"{len(reports)} relatório(s) salvo(s) para o usuário logado.")
-    for report in reports:
-        with st.container(border=True):
-            created_at = datetime.fromisoformat(report["created_at"]).strftime("%d/%m/%Y %H:%M")
-            st.markdown(
-                f"**{report['audit_name'] or 'Sem nome'}**  \n"
-                f"Canal: {report['channel'] or 'Não informado'}  \n"
-                f"Data do teste: {date.fromisoformat(report['audit_date']).strftime('%d/%m/%Y')}  \n"
-                f"Salvo em: {created_at}"
-            )
-            st.button(
-                "Carregar este relatório",
-                key=f"load_saved_{report['id']}",
-                use_container_width=True,
-                on_click=load_saved_report,
-                args=(report["id"],),
-            )
+    else:
+        st.caption(f"{len(reports)} relatório(s) salvo(s) para o usuário logado.")
+        for report in reports:
+            with st.container(border=True):
+                created_at = datetime.fromisoformat(report["created_at"]).strftime("%d/%m/%Y %H:%M")
+                st.markdown(
+                    f"**{report['audit_name'] or 'Sem nome'}**  \n"
+                    f"Canal: {report['channel'] or 'Não informado'}  \n"
+                    f"Data do teste: {date.fromisoformat(report['audit_date']).strftime('%d/%m/%Y')}  \n"
+                    f"Salvo em: {created_at}"
+                )
+                st.button(
+                    "Carregar este relatório",
+                    key=f"load_saved_{report['id']}",
+                    use_container_width=True,
+                    on_click=load_saved_report,
+                    args=(report["id"],),
+                )
 
     with st.form("clear_saved_reports_form"):
         st.warning("Para limpar os relatórios salvos, confirme sua senha atual.")
