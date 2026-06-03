@@ -15,6 +15,7 @@ import streamlit as st
 
 AUTH_FILE = Path(".streamlit_runtime/auth.json")
 PBKDF2_ITERATIONS = 390_000
+MAX_IMAGE_SIZE_MB = 5
 
 
 st.set_page_config(
@@ -94,6 +95,7 @@ def init_state() -> None:
         "auditor": "",
         "audit_date": date.today(),
         "editing_id": None,
+        "upload_version": 0,
     }
 
     for key, value in defaults.items():
@@ -217,9 +219,12 @@ def make_csv() -> str:
     writer.writerow(["Não conformes", summary["non_conform"]])
     writer.writerow(["Percentual de conformidade", f'{summary["rate"]}%'])
     writer.writerow([])
-    writer.writerow(["Teste", "Status", "Cenário", "Esperado", "Observações"])
+    writer.writerow(["Teste", "Status", "Cenário", "Esperado", "Observações", "Anexos"])
 
     for test in st.session_state.tests:
+        attachment_names = ", ".join(
+            attachment["name"] for attachment in test.get("attachments", [])
+        )
         writer.writerow(
             [
                 test["title"],
@@ -227,6 +232,7 @@ def make_csv() -> str:
                 test["scenario"],
                 test["expected"],
                 test["notes"],
+                attachment_names,
             ]
         )
 
@@ -238,6 +244,32 @@ def reset_form() -> None:
     for key in ("title_input", "scenario_input", "expected_input", "notes_input"):
         st.session_state[key] = ""
     st.session_state.status_input = "conforme"
+    st.session_state.upload_version += 1
+
+
+def uploaded_images() -> list[dict[str, object]]:
+    key = f"attachments_input_{st.session_state.upload_version}"
+    files = st.session_state.get(key) or []
+    attachments = []
+
+    for file in files:
+        data = file.getvalue()
+        size_mb = len(data) / (1024 * 1024)
+        if size_mb > MAX_IMAGE_SIZE_MB:
+            st.warning(
+                f"{file.name} foi ignorado. Limite: {MAX_IMAGE_SIZE_MB} MB por imagem."
+            )
+            continue
+
+        attachments.append(
+            {
+                "name": file.name,
+                "type": file.type,
+                "data": data,
+            }
+        )
+
+    return attachments
 
 
 def save_test() -> None:
@@ -253,9 +285,16 @@ def save_test() -> None:
         "expected": st.session_state.expected_input.strip(),
         "notes": st.session_state.notes_input.strip(),
         "status": st.session_state.status_input,
+        "attachments": uploaded_images(),
     }
 
     if st.session_state.editing_id:
+        current = next(
+            (item for item in st.session_state.tests if item["id"] == st.session_state.editing_id),
+            None,
+        )
+        existing_attachments = current.get("attachments", []) if current else []
+        payload["attachments"] = existing_attachments + payload["attachments"]
         st.session_state.tests = [
             payload if item["id"] == st.session_state.editing_id else item
             for item in st.session_state.tests
@@ -278,6 +317,7 @@ def edit_test(test_id: str) -> None:
     st.session_state.expected_input = test["expected"]
     st.session_state.notes_input = test["notes"]
     st.session_state.status_input = test["status"]
+    st.session_state.upload_version += 1
 
 
 def delete_test(test_id: str) -> None:
@@ -359,6 +399,39 @@ def render_test_form() -> None:
             height=120,
         )
 
+    upload_key = f"attachments_input_{st.session_state.upload_version}"
+    files = st.file_uploader(
+        "Evidências em imagem",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key=upload_key,
+        help="Aceita PNG, JPG e JPEG. Limite recomendado: 5 MB por imagem.",
+    )
+
+    if files:
+        st.caption("Pré-visualização dos anexos")
+        preview_cols = st.columns(min(3, len(files)))
+        for index, file in enumerate(files):
+            with preview_cols[index % len(preview_cols)]:
+                st.image(file, caption=file.name, use_container_width=True)
+
+    if st.session_state.editing_id:
+        current = next(
+            (item for item in st.session_state.tests if item["id"] == st.session_state.editing_id),
+            None,
+        )
+        existing_attachments = current.get("attachments", []) if current else []
+        if existing_attachments:
+            st.caption("Anexos já salvos neste teste")
+            preview_cols = st.columns(min(3, len(existing_attachments)))
+            for index, attachment in enumerate(existing_attachments):
+                with preview_cols[index % len(preview_cols)]:
+                    st.image(
+                        attachment["data"],
+                        caption=attachment["name"],
+                        use_container_width=True,
+                    )
+
     label = "Salvar alteração" if st.session_state.editing_id else "Adicionar teste"
     cols = st.columns([0.25, 0.25, 0.5])
     with cols[0]:
@@ -403,6 +476,18 @@ def render_report() -> None:
             st.write(f"**Cenário:** {test['scenario'] or 'Não informado.'}")
             st.write(f"**Esperado:** {test['expected'] or 'Não informado.'}")
             st.write(f"**Observações:** {test['notes'] or 'Não informado.'}")
+
+            attachments = test.get("attachments", [])
+            if attachments:
+                st.write("**Evidências:**")
+                image_cols = st.columns(min(3, len(attachments)))
+                for image_index, attachment in enumerate(attachments):
+                    with image_cols[image_index % len(image_cols)]:
+                        st.image(
+                            attachment["data"],
+                            caption=attachment["name"],
+                            use_container_width=True,
+                        )
 
             action_cols = st.columns([0.18, 0.18, 0.64])
             with action_cols[0]:
