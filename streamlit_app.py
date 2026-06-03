@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
-from io import StringIO
+from html import escape
+from io import BytesIO, StringIO
 from pathlib import Path
 import csv
 import hashlib
@@ -11,6 +12,24 @@ import os
 import uuid
 
 import streamlit as st
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.lib.utils import ImageReader
+from reportlab.platypus import (
+    Image as PdfImage,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 AUTH_FILE = Path(".streamlit_runtime/auth.json")
@@ -239,6 +258,312 @@ def make_csv() -> str:
     return output.getvalue()
 
 
+def report_base_name() -> str:
+    raw_name = st.session_state.audit_name or "testes-whatsapp"
+    safe_name = "".join(
+        char.lower() if char.isalnum() else "-"
+        for char in raw_name
+    ).strip("-")
+    return safe_name or "testes-whatsapp"
+
+
+def executive_reading(summary: dict[str, int]) -> str:
+    rate = summary["rate"]
+    if summary["total"] == 0:
+        return "Nenhum teste foi registrado nesta bateria."
+    if rate >= 90:
+        return "A bateria apresenta alta aderencia aos criterios esperados."
+    if rate >= 70:
+        return "A bateria apresenta aderencia parcial e requer acompanhamento dos itens nao conformes."
+    return "A bateria indica pontos criticos que exigem plano de acao antes de expansao ou aceite operacional."
+
+
+def pdf_text(value: object, fallback: str = "Nao informado") -> str:
+    text = str(value or fallback)
+    return escape(text)
+
+
+def make_pdf_report() -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.5 * cm,
+        leftMargin=1.5 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
+        title="Relatorio Executivo de Validacao",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontSize=20,
+        leading=24,
+        textColor=colors.HexColor("#143642"),
+        spaceAfter=14,
+    )
+    heading_style = ParagraphStyle(
+        "ReportHeading",
+        parent=styles["Heading2"],
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#143642"),
+        spaceBefore=10,
+        spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=12,
+    )
+    small_style = ParagraphStyle(
+        "ReportSmall",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=10,
+    )
+
+    summary = calculate_summary()
+    story = [
+        Paragraph("Relatorio executivo de validacao", title_style),
+        Paragraph("Automacoes de atendimento WhatsApp / call center", styles["Heading3"]),
+        Spacer(1, 8),
+        Paragraph(
+            f"<b>Bateria:</b> {pdf_text(st.session_state.audit_name)}<br/>"
+            f"<b>Canal:</b> {pdf_text(st.session_state.channel)}<br/>"
+            f"<b>Responsavel:</b> {pdf_text(st.session_state.auditor)}<br/>"
+            f"<b>Data:</b> {st.session_state.audit_date.strftime('%d/%m/%Y')}",
+            body_style,
+        ),
+        Spacer(1, 12),
+        Paragraph("Resumo executivo", heading_style),
+        Paragraph(executive_reading(summary), body_style),
+        Spacer(1, 10),
+    ]
+
+    metrics_table = Table(
+        [
+            ["Total de testes", "Conformes", "Nao conformes", "Pendentes", "Conformidade"],
+            [
+                summary["total"],
+                summary["conform"],
+                summary["non_conform"],
+                summary["total"] - summary["conform"] - summary["non_conform"],
+                f'{summary["rate"]}%',
+            ],
+        ],
+        colWidths=[3.2 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm],
+    )
+    metrics_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#143642")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#eef5f3")),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#b7c9c3")),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    story.extend([metrics_table, Spacer(1, 12), Paragraph("Detalhamento dos testes", heading_style)])
+
+    if not st.session_state.tests:
+        story.append(Paragraph("Nenhum teste cadastrado.", body_style))
+    else:
+        for index, test in enumerate(st.session_state.tests, start=1):
+            story.append(Paragraph(f"Teste {index}: {pdf_text(test['title'])}", heading_style))
+            story.append(
+                Paragraph(
+                    f"<b>Resultado:</b> {status_label(test['status'])}<br/>"
+                    f"<b>Cenario:</b> {pdf_text(test['scenario'], 'Nao informado.')}<br/>"
+                    f"<b>Resposta esperada:</b> {pdf_text(test['expected'], 'Nao informado.')}<br/>"
+                    f"<b>Observacoes:</b> {pdf_text(test['notes'], 'Nao informado.')}",
+                    body_style,
+                )
+            )
+
+            attachments = test.get("attachments", [])
+            if attachments:
+                story.append(Spacer(1, 6))
+                story.append(Paragraph("Evidencias", small_style))
+                for attachment in attachments[:4]:
+                    try:
+                        image_reader = ImageReader(BytesIO(attachment["data"]))
+                        width, height = image_reader.getSize()
+                        max_width = 14 * cm
+                        max_height = 8 * cm
+                        scale = min(max_width / width, max_height / height)
+                        image = PdfImage(
+                            BytesIO(attachment["data"]),
+                            width=width * scale,
+                            height=height * scale,
+                        )
+                        story.append(image)
+                        story.append(Paragraph(pdf_text(attachment["name"]), small_style))
+                        story.append(Spacer(1, 6))
+                    except Exception:
+                        story.append(
+                            Paragraph(
+                                f"Imagem nao renderizada: {pdf_text(attachment['name'])}",
+                                small_style,
+                            )
+                        )
+
+            story.append(Spacer(1, 8))
+
+    story.append(PageBreak())
+    story.append(Paragraph("Conclusao executiva", heading_style))
+    story.append(
+        Paragraph(
+            f"Percentual de conformidade apurado: <b>{summary['rate']}%</b>. "
+            f"{executive_reading(summary)}",
+            body_style,
+        )
+    )
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def add_title(slide, title: str, subtitle: str | None = None) -> None:
+    title_box = slide.shapes.add_textbox(Inches(0.6), Inches(0.45), Inches(8.2), Inches(0.7))
+    title_frame = title_box.text_frame
+    title_frame.text = title
+    title_frame.paragraphs[0].font.bold = True
+    title_frame.paragraphs[0].font.size = Pt(28)
+    title_frame.paragraphs[0].font.color.rgb = RGBColor(20, 54, 66)
+
+    if subtitle:
+        subtitle_box = slide.shapes.add_textbox(Inches(0.62), Inches(1.1), Inches(8.1), Inches(0.4))
+        subtitle_frame = subtitle_box.text_frame
+        subtitle_frame.text = subtitle
+        subtitle_frame.paragraphs[0].font.size = Pt(13)
+        subtitle_frame.paragraphs[0].font.color.rgb = RGBColor(77, 94, 102)
+
+
+def add_metric_box(slide, left, top, title: str, value: str, color: RGBColor) -> None:
+    shape = slide.shapes.add_shape(1, left, top, Inches(2.0), Inches(1.0))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.color.rgb = color
+    frame = shape.text_frame
+    frame.clear()
+    p = frame.paragraphs[0]
+    p.text = value
+    p.alignment = PP_ALIGN.CENTER
+    p.font.bold = True
+    p.font.size = Pt(24)
+    p.font.color.rgb = RGBColor(255, 255, 255)
+    p2 = frame.add_paragraph()
+    p2.text = title
+    p2.alignment = PP_ALIGN.CENTER
+    p2.font.size = Pt(10)
+    p2.font.color.rgb = RGBColor(255, 255, 255)
+
+
+def add_bullet(slide, text: str, top: float, bold_prefix: str | None = None) -> None:
+    box = slide.shapes.add_textbox(Inches(0.75), Inches(top), Inches(8.2), Inches(0.55))
+    frame = box.text_frame
+    frame.word_wrap = True
+    paragraph = frame.paragraphs[0]
+    paragraph.font.size = Pt(15)
+    paragraph.font.color.rgb = RGBColor(34, 42, 46)
+    if bold_prefix and text.startswith(bold_prefix):
+        run = paragraph.add_run()
+        run.text = bold_prefix
+        run.font.bold = True
+        run.font.size = Pt(15)
+        run.font.color.rgb = RGBColor(20, 54, 66)
+        paragraph.add_run().text = text[len(bold_prefix):]
+    else:
+        paragraph.text = text
+
+
+def make_pptx_report() -> bytes:
+    presentation = Presentation()
+    presentation.slide_width = Inches(10)
+    presentation.slide_height = Inches(5.625)
+    blank_layout = presentation.slide_layouts[6]
+    summary = calculate_summary()
+
+    cover = presentation.slides.add_slide(blank_layout)
+    add_title(cover, "Validacao de automacoes WhatsApp", "Relatorio executivo para diretoria")
+    add_bullet(cover, f"Bateria: {st.session_state.audit_name or 'Nao informado'}", 2.0, "Bateria:")
+    add_bullet(cover, f"Canal: {st.session_state.channel or 'Nao informado'}", 2.55, "Canal:")
+    add_bullet(cover, f"Responsavel: {st.session_state.auditor or 'Nao informado'}", 3.1, "Responsavel:")
+    add_bullet(cover, f"Data: {st.session_state.audit_date.strftime('%d/%m/%Y')}", 3.65, "Data:")
+
+    metrics = presentation.slides.add_slide(blank_layout)
+    add_title(metrics, "Resumo dos indicadores", executive_reading(summary))
+    add_metric_box(metrics, Inches(0.7), Inches(2.0), "Total", str(summary["total"]), RGBColor(20, 54, 66))
+    add_metric_box(metrics, Inches(2.95), Inches(2.0), "Conformes", str(summary["conform"]), RGBColor(27, 132, 87))
+    add_metric_box(metrics, Inches(5.2), Inches(2.0), "Nao conformes", str(summary["non_conform"]), RGBColor(197, 76, 64))
+    add_metric_box(metrics, Inches(7.45), Inches(2.0), "Conformidade", f'{summary["rate"]}%', RGBColor(38, 108, 164))
+
+    detail = presentation.slides.add_slide(blank_layout)
+    add_title(detail, "Principais resultados por teste")
+    top = 1.45
+    for index, test in enumerate(st.session_state.tests[:6], start=1):
+        add_bullet(
+            detail,
+            f"{index}. {test['title']} - {status_label(test['status'])}",
+            top,
+        )
+        top += 0.5
+    if len(st.session_state.tests) > 6:
+        add_bullet(detail, f"+ {len(st.session_state.tests) - 6} testes adicionais no relatorio PDF.", top)
+    if not st.session_state.tests:
+        add_bullet(detail, "Nenhum teste cadastrado ate o momento.", top)
+
+    non_conform = [
+        test for test in st.session_state.tests
+        if test["status"] == "nao-conforme"
+    ]
+    action = presentation.slides.add_slide(blank_layout)
+    add_title(action, "Pontos de atencao e plano de acao")
+    if non_conform:
+        top = 1.45
+        for index, test in enumerate(non_conform[:5], start=1):
+            note = test["notes"] or test["scenario"] or "Sem observacao registrada."
+            add_bullet(action, f"{index}. {test['title']}: {note[:150]}", top)
+            top += 0.68
+    else:
+        add_bullet(action, "Nao foram registrados testes nao conformes nesta bateria.", 1.6)
+        add_bullet(action, "Recomendacao: manter monitoramento periodico e revalidar fluxos criticos.", 2.25)
+
+    evidence_tests = [
+        test for test in st.session_state.tests
+        if test.get("attachments")
+    ][:3]
+    for test in evidence_tests:
+        slide = presentation.slides.add_slide(blank_layout)
+        add_title(slide, f"Evidencias - {test['title'][:45]}", status_label(test["status"]))
+        left = 0.65
+        top = 1.45
+        for attachment in test.get("attachments", [])[:3]:
+            try:
+                slide.shapes.add_picture(
+                    BytesIO(attachment["data"]),
+                    Inches(left),
+                    Inches(top),
+                    width=Inches(2.7),
+                )
+                left += 3.05
+            except Exception:
+                add_bullet(slide, f"Imagem nao renderizada: {attachment['name']}", top)
+
+    buffer = BytesIO()
+    presentation.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def reset_form() -> None:
     st.session_state.editing_id = None
     for key in ("title_input", "scenario_input", "expected_input", "notes_input"):
@@ -460,6 +785,25 @@ def render_report() -> None:
         mime="text/csv",
         use_container_width=True,
     )
+    col_pdf, col_ppt = st.columns(2)
+    with col_pdf:
+        st.download_button(
+            "Baixar relatório executivo PDF",
+            data=make_pdf_report(),
+            file_name=f"{report_base_name()}-relatorio-executivo.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            disabled=not st.session_state.tests,
+        )
+    with col_ppt:
+        st.download_button(
+            "Baixar modelo PowerPoint",
+            data=make_pptx_report(),
+            file_name=f"{report_base_name()}-apresentacao-diretoria.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            use_container_width=True,
+            disabled=not st.session_state.tests,
+        )
 
     if not st.session_state.tests:
         st.info("Nenhum teste cadastrado ainda.")
