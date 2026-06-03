@@ -20,7 +20,7 @@ MAX_IMAGE_SIZE_MB = 5
 
 st.set_page_config(
     page_title="Validador WhatsApp",
-    page_icon="OK",
+    page_icon="✅",
     layout="wide",
 )
 
