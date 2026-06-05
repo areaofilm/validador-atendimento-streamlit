@@ -378,6 +378,7 @@ def init_state() -> None:
         "audit_date": date.today(),
         "editing_id": None,
         "upload_version": 0,
+        "report_saved_message": "",
     }
 
     for key, value in defaults.items():
@@ -608,7 +609,19 @@ def save_current_report_snapshot() -> None:
             "created_at": datetime.now().isoformat(timespec="seconds"),
         },
     )
-    st.success("Relatório salvo no banco local.")
+    st.session_state.report_saved_message = (
+        "Relatório salvo com sucesso. O formulário foi limpo para iniciar uma nova bateria."
+    )
+    clear_current_report()
+
+
+def clear_current_report() -> None:
+    st.session_state.audit_name = ""
+    st.session_state.channel = ""
+    st.session_state.auditor = ""
+    st.session_state.audit_date = date.today()
+    st.session_state.tests = []
+    reset_form()
 
 
 def list_saved_reports() -> list[dict[str, object]]:
@@ -1363,6 +1376,9 @@ def render_test_form() -> None:
 
 def render_report() -> None:
     st.subheader("Relatório final")
+    if st.session_state.report_saved_message:
+        st.success(st.session_state.report_saved_message)
+        st.session_state.report_saved_message = ""
 
     summary = calculate_summary()
     st.write(
