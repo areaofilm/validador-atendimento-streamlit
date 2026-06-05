@@ -26,6 +26,7 @@ from reportlab.lib.units import cm
 from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     Image as PdfImage,
+    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -37,6 +38,7 @@ from reportlab.platypus import (
 
 RUNTIME_DIR = Path(".streamlit_runtime")
 DB_PATH = RUNTIME_DIR / "validador.db"
+LOGO_PATH = Path("logo_Valenet.png")
 PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
 
@@ -496,6 +498,46 @@ def pdf_text(value: object, fallback: str = "Nao informado") -> str:
     return escape(text)
 
 
+def draw_pdf_footer(canvas, doc) -> None:
+    canvas.saveState()
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(colors.HexColor("#6b7b83"))
+    canvas.drawString(doc.leftMargin, 0.75 * cm, f"Pagina {doc.page}")
+
+    logo_file = LOGO_PATH if LOGO_PATH.exists() else Path("../logo_Valenet.png")
+    if logo_file.exists():
+        try:
+            image = ImageReader(str(logo_file))
+            width, height = image.getSize()
+            logo_width = 3.1 * cm
+            logo_height = logo_width * (height / width)
+            x = doc.pagesize[0] - doc.rightMargin - logo_width
+            y = 0.45 * cm
+            canvas.drawImage(
+                image,
+                x,
+                y,
+                width=logo_width,
+                height=logo_height,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
+        except Exception:
+            canvas.drawRightString(
+                doc.pagesize[0] - doc.rightMargin,
+                0.75 * cm,
+                "VALENET",
+            )
+    else:
+        canvas.drawRightString(
+            doc.pagesize[0] - doc.rightMargin,
+            0.75 * cm,
+            "VALENET",
+        )
+
+    canvas.restoreState()
+
+
 def make_pdf_report() -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -504,7 +546,7 @@ def make_pdf_report() -> bytes:
         rightMargin=1.5 * cm,
         leftMargin=1.5 * cm,
         topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
+        bottomMargin=2.2 * cm,
         title="Relatorio Executivo de Validacao",
     )
     styles = getSampleStyleSheet()
@@ -530,15 +572,18 @@ def make_pdf_report() -> bytes:
         parent=styles["BodyText"],
         fontSize=9,
         leading=12,
+        spaceAfter=5,
     )
     small_style = ParagraphStyle(
         "ReportSmall",
         parent=styles["BodyText"],
         fontSize=8,
         leading=10,
+        textColor=colors.HexColor("#465a63"),
     )
 
     summary = calculate_summary()
+    pending = summary["total"] - summary["conform"] - summary["non_conform"]
     story = [
         Paragraph("Relatorio executivo de validacao", title_style),
         Paragraph("Automacoes de atendimento WhatsApp / call center", styles["Heading3"]),
@@ -553,6 +598,11 @@ def make_pdf_report() -> bytes:
         Spacer(1, 12),
         Paragraph("Resumo executivo", heading_style),
         Paragraph(executive_reading(summary), body_style),
+        Paragraph(
+            "Este relatorio consolida os testes registrados no aplicativo, "
+            "incluindo resultados, cenarios, respostas esperadas, observacoes e evidencias anexadas.",
+            body_style,
+        ),
         Spacer(1, 10),
     ]
 
@@ -563,7 +613,7 @@ def make_pdf_report() -> bytes:
                 summary["total"],
                 summary["conform"],
                 summary["non_conform"],
-                summary["total"] - summary["conform"] - summary["non_conform"],
+                pending,
                 f'{summary["rate"]}%',
             ],
         ],
@@ -584,18 +634,49 @@ def make_pdf_report() -> bytes:
             ]
         )
     )
-    story.extend([metrics_table, Spacer(1, 12), Paragraph("Detalhamento dos testes", heading_style)])
+    story.extend(
+        [
+            metrics_table,
+            Spacer(1, 12),
+            Paragraph("Cobertura da bateria", heading_style),
+            Paragraph(
+                f"Foram registrados {summary['total']} teste(s): "
+                f"{summary['conform']} conforme(s), "
+                f"{summary['non_conform']} nao conforme(s) e "
+                f"{pending} pendente(s).",
+                body_style,
+            ),
+            Spacer(1, 6),
+            Paragraph("Detalhamento dos testes", heading_style),
+        ]
+    )
 
     if not st.session_state.tests:
         story.append(Paragraph("Nenhum teste cadastrado.", body_style))
     else:
         for index, test in enumerate(st.session_state.tests, start=1):
-            story.append(Paragraph(f"Teste {index}: {pdf_text(test['title'])}", heading_style))
+            header_block = [
+                Paragraph(f"Teste {index}: {pdf_text(test['title'])}", heading_style),
+                Paragraph(
+                    f"<b>Resultado:</b> {status_label(test['status'])}",
+                    body_style,
+                ),
+            ]
+            story.append(KeepTogether(header_block))
             story.append(
                 Paragraph(
-                    f"<b>Resultado:</b> {status_label(test['status'])}<br/>"
-                    f"<b>Cenario:</b> {pdf_text(test['scenario'], 'Nao informado.')}<br/>"
-                    f"<b>Resposta esperada:</b> {pdf_text(test['expected'], 'Nao informado.')}<br/>"
+                    f"<b>Cenario:</b> {pdf_text(test['scenario'], 'Nao informado.')}",
+                    body_style,
+                )
+            )
+            story.append(
+                Paragraph(
+                    f"<b>Resposta esperada:</b> {pdf_text(test['expected'], 'Nao informado.')}",
+                    body_style,
+                )
+            )
+            story.append(
+                Paragraph(
                     f"<b>Observacoes:</b> {pdf_text(test['notes'], 'Nao informado.')}",
                     body_style,
                 )
@@ -604,13 +685,13 @@ def make_pdf_report() -> bytes:
             attachments = test.get("attachments", [])
             if attachments:
                 story.append(Spacer(1, 6))
-                story.append(Paragraph("Evidencias", small_style))
-                for attachment in attachments[:4]:
+                story.append(Paragraph(f"Evidencias anexadas ({len(attachments)})", small_style))
+                for attachment in attachments:
                     try:
                         image_reader = ImageReader(BytesIO(attachment["data"]))
                         width, height = image_reader.getSize()
                         max_width = 14 * cm
-                        max_height = 8 * cm
+                        max_height = 7.5 * cm
                         scale = min(max_width / width, max_height / height)
                         image = PdfImage(
                             BytesIO(attachment["data"]),
@@ -639,7 +720,7 @@ def make_pdf_report() -> bytes:
             body_style,
         )
     )
-    doc.build(story)
+    doc.build(story, onFirstPage=draw_pdf_footer, onLaterPages=draw_pdf_footer)
     buffer.seek(0)
     return buffer.getvalue()
 
