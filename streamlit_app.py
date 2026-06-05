@@ -11,10 +11,11 @@ import hashlib
 import hmac
 import json
 import os
-import sqlite3
 import uuid
 
 import streamlit as st
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
@@ -41,6 +42,7 @@ DB_PATH = RUNTIME_DIR / "validador.db"
 LOGO_PATH = Path("logo_Valenet.png")
 PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
+_DATABASE_ENGINE = None
 
 
 st.set_page_config(
@@ -54,6 +56,48 @@ def get_credentials() -> tuple[str, str]:
     username = os.getenv("APP_USERNAME") or st.secrets.get("APP_USERNAME", "")
     password = os.getenv("APP_PASSWORD") or st.secrets.get("APP_PASSWORD", "")
     return username, password
+
+
+def get_admin_credentials() -> tuple[str, str]:
+    username = os.getenv("APP_ADMIN_USERNAME") or st.secrets.get("APP_ADMIN_USERNAME", "Admin")
+    password = os.getenv("APP_ADMIN_PASSWORD") or st.secrets.get("APP_ADMIN_PASSWORD", "ValenetAdmin2026")
+    return username, password
+
+
+def get_database_url() -> str:
+    database_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+    if database_url:
+        return database_url
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{DB_PATH.resolve().as_posix()}"
+
+
+def get_engine():
+    global _DATABASE_ENGINE
+    if _DATABASE_ENGINE is None:
+        _DATABASE_ENGINE = create_engine(get_database_url(), future=True)
+    return _DATABASE_ENGINE
+
+
+def execute_statement(sql: str, params: dict[str, object] | None = None) -> None:
+    with get_engine().begin() as connection:
+        connection.execute(text(sql), params or {})
+
+
+def fetch_one(sql: str, params: dict[str, object] | None = None):
+    with get_engine().connect() as connection:
+        return connection.execute(text(sql), params or {}).mappings().fetchone()
+
+
+def fetch_all(sql: str, params: dict[str, object] | None = None) -> list[dict[str, object]]:
+    with get_engine().connect() as connection:
+        return list(connection.execute(text(sql), params or {}).mappings().fetchall())
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -77,89 +121,106 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(candidate, expected_digest)
 
 
-def get_connection() -> sqlite3.Connection:
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
 def initialize_database() -> None:
     expected_username, initial_password = get_credentials()
-    with get_connection() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password_hash TEXT NOT NULL,
-                must_change_password INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
+    admin_username, admin_password = get_admin_credentials()
+    execute_statement(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            must_change_password INTEGER NOT NULL DEFAULT 1,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_login_at TEXT
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS saved_reports (
-                id TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                audit_name TEXT,
-                channel TEXT,
-                auditor TEXT,
-                audit_date TEXT,
-                tests_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(username) REFERENCES users(username)
-            )
-            """
+        """
+    )
+    execute_statement(
+        """
+        CREATE TABLE IF NOT EXISTS saved_reports (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            audit_name TEXT,
+            channel TEXT,
+            auditor TEXT,
+            audit_date TEXT,
+            tests_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(username) REFERENCES users(username)
         )
+        """
+    )
 
-        if expected_username and initial_password:
-            existing = connection.execute(
-                "SELECT username FROM users WHERE username = ?",
-                (expected_username,),
-            ).fetchone()
-            if existing is None:
-                now = datetime.now().isoformat(timespec="seconds")
-                connection.execute(
-                    """
-                    INSERT INTO users (
-                        username, password_hash, must_change_password, created_at, updated_at
-                    )
-                    VALUES (?, ?, 1, ?, ?)
-                    """,
-                    (expected_username, hash_password(initial_password), now, now),
-                )
+    for alter_sql in (
+        "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+        "ALTER TABLE users ADD COLUMN last_login_at TEXT",
+    ):
+        try:
+            execute_statement(alter_sql)
+        except SQLAlchemyError:
+            pass
+
+    create_default_user(expected_username, initial_password, "user")
+    create_default_user(admin_username, admin_password, "admin")
 
 
-def get_user(username: str) -> sqlite3.Row | None:
+def create_default_user(username: str, password: str, role: str) -> None:
+    if not username or not password:
+        return
+
+    existing = fetch_one(
+        "SELECT username FROM users WHERE username = :username",
+        {"username": username},
+    )
+    if existing is not None:
+        return
+
+    now = datetime.now().isoformat(timespec="seconds")
+    execute_statement(
+        """
+        INSERT INTO users (
+            username, password_hash, must_change_password, role, created_at, updated_at
+        )
+        VALUES (:username, :password_hash, 1, :role, :created_at, :updated_at)
+        """,
+        {
+            "username": username,
+            "password_hash": hash_password(password),
+            "role": role,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+
+def get_user(username: str):
     initialize_database()
-    with get_connection() as connection:
-        return connection.execute(
-            "SELECT * FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
+    return fetch_one(
+        "SELECT * FROM users WHERE username = :username",
+        {"username": username},
+    )
 
 
 def save_new_password(username: str, password: str) -> None:
     initialize_database()
     now = datetime.now().isoformat(timespec="seconds")
-    with get_connection() as connection:
-        connection.execute(
-            """
-            UPDATE users
-            SET password_hash = ?, must_change_password = 0, updated_at = ?
-            WHERE username = ?
-            """,
-            (hash_password(password), now, username),
-        )
+    execute_statement(
+        """
+        UPDATE users
+        SET password_hash = :password_hash, must_change_password = 0, updated_at = :updated_at
+        WHERE username = :username
+        """,
+        {
+            "password_hash": hash_password(password),
+            "updated_at": now,
+            "username": username,
+        },
+    )
 
 
 def validate_login(username: str, password: str) -> tuple[bool, bool]:
-    expected_username, initial_password = get_credentials()
-    if username != expected_username:
-        return False, False
-
     user = get_user(username)
     if not user:
         return False, False
@@ -167,7 +228,15 @@ def validate_login(username: str, password: str) -> tuple[bool, bool]:
     if not verify_password(password, user["password_hash"]):
         return False, False
 
-    if user["must_change_password"] or password == initial_password:
+    execute_statement(
+        "UPDATE users SET last_login_at = :last_login_at WHERE username = :username",
+        {
+            "last_login_at": datetime.now().isoformat(timespec="seconds"),
+            "username": username,
+        },
+    )
+
+    if user["must_change_password"]:
         return True, True
 
     return True, False
@@ -188,6 +257,7 @@ def init_state() -> None:
         "authenticated": False,
         "pending_password_change": False,
         "current_user": "",
+        "current_role": "",
         "login_username": "",
         "tests": [],
         "audit_name": "",
@@ -238,7 +308,9 @@ def login_screen() -> None:
                 st.session_state.authenticated = False
                 st.rerun()
             elif valid_login:
+                user = get_user(username)
                 st.session_state.current_user = username
+                st.session_state.current_role = user["role"] if user else "user"
                 st.session_state.login_username = ""
                 st.session_state.pending_password_change = False
                 st.session_state.authenticated = True
@@ -284,7 +356,9 @@ def password_change_screen() -> None:
             return
 
         save_new_password(username, new_password)
+        user = get_user(username)
         st.session_state.current_user = username
+        st.session_state.current_role = user["role"] if user else "user"
         st.session_state.login_username = ""
         st.session_state.pending_password_change = False
         st.session_state.authenticated = True
@@ -386,56 +460,55 @@ def save_current_report_snapshot() -> None:
         st.error("Faça login novamente para salvar o relatório.")
         return
 
-    with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO saved_reports (
-                id, username, audit_name, channel, auditor, audit_date, tests_json, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(uuid.uuid4()),
-                username,
-                st.session_state.audit_name,
-                st.session_state.channel,
-                st.session_state.auditor,
-                st.session_state.audit_date.isoformat(),
-                serialize_tests(st.session_state.tests),
-                datetime.now().isoformat(timespec="seconds"),
-            ),
+    execute_statement(
+        """
+        INSERT INTO saved_reports (
+            id, username, audit_name, channel, auditor, audit_date, tests_json, created_at
         )
+        VALUES (
+            :id, :username, :audit_name, :channel, :auditor, :audit_date, :tests_json, :created_at
+        )
+        """,
+        {
+            "id": str(uuid.uuid4()),
+            "username": username,
+            "audit_name": st.session_state.audit_name,
+            "channel": st.session_state.channel,
+            "auditor": st.session_state.auditor,
+            "audit_date": st.session_state.audit_date.isoformat(),
+            "tests_json": serialize_tests(st.session_state.tests),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
     st.success("Relatório salvo no banco local.")
 
 
-def list_saved_reports() -> list[sqlite3.Row]:
+def list_saved_reports() -> list[dict[str, object]]:
     username = st.session_state.get("current_user")
     if not username:
         return []
 
-    with get_connection() as connection:
-        return connection.execute(
-            """
-            SELECT *
-            FROM saved_reports
-            WHERE username = ?
-            ORDER BY created_at DESC
-            """,
-            (username,),
-        ).fetchall()
+    return fetch_all(
+        """
+        SELECT *
+        FROM saved_reports
+        WHERE username = :username
+        ORDER BY created_at DESC
+        """,
+        {"username": username},
+    )
 
 
 def load_saved_report(report_id: str) -> None:
     username = st.session_state.get("current_user")
-    with get_connection() as connection:
-        report = connection.execute(
-            """
-            SELECT *
-            FROM saved_reports
-            WHERE id = ? AND username = ?
-            """,
-            (report_id, username),
-        ).fetchone()
+    report = fetch_one(
+        """
+        SELECT *
+        FROM saved_reports
+        WHERE id = :id AND username = :username
+        """,
+        {"id": report_id, "username": username},
+    )
 
     if not report:
         st.error("Relatório salvo não encontrado.")
@@ -451,40 +524,121 @@ def load_saved_report(report_id: str) -> None:
 
 def clear_saved_reports() -> None:
     username = st.session_state.get("current_user")
-    with get_connection() as connection:
-        connection.execute(
-            "DELETE FROM saved_reports WHERE username = ?",
-            (username,),
-        )
+    execute_statement(
+        "DELETE FROM saved_reports WHERE username = :username",
+        {"username": username},
+    )
     st.success("Relatórios salvos foram limpos do banco local.")
 
 
 def delete_saved_report(report_id: str) -> None:
     username = st.session_state.get("current_user")
-    with get_connection() as connection:
-        cursor = connection.execute(
-            """
-            DELETE FROM saved_reports
-            WHERE id = ? AND username = ?
-            """,
-            (report_id, username),
-        )
-
-    if cursor.rowcount:
-        st.success("Relatório selecionado excluído com sucesso.")
-    else:
+    report = fetch_one(
+        """
+        SELECT id
+        FROM saved_reports
+        WHERE id = :id AND username = :username
+        """,
+        {"id": report_id, "username": username},
+    )
+    if not report:
         st.error("Relatório selecionado não foi encontrado.")
+        return
+
+    execute_statement(
+        """
+        DELETE FROM saved_reports
+        WHERE id = :id AND username = :username
+        """,
+        {"id": report_id, "username": username},
+    )
+    st.success("Relatório selecionado excluído com sucesso.")
+
+
+def list_all_users() -> list[dict[str, object]]:
+    return fetch_all(
+        """
+        SELECT
+            u.username,
+            u.role,
+            u.must_change_password,
+            u.created_at,
+            u.updated_at,
+            u.last_login_at,
+            COUNT(r.id) AS saved_reports
+        FROM users u
+        LEFT JOIN saved_reports r ON r.username = u.username
+        GROUP BY
+            u.username, u.role, u.must_change_password, u.created_at, u.updated_at, u.last_login_at
+        ORDER BY u.role DESC, u.username ASC
+        """
+    )
+
+
+def list_all_saved_reports() -> list[dict[str, object]]:
+    return fetch_all(
+        """
+        SELECT *
+        FROM saved_reports
+        ORDER BY created_at DESC
+        """
+    )
+
+
+def load_any_saved_report(report_id: str) -> None:
+    report = fetch_one(
+        """
+        SELECT *
+        FROM saved_reports
+        WHERE id = :id
+        """,
+        {"id": report_id},
+    )
+
+    if not report:
+        st.error("Relatório salvo não encontrado.")
+        return
+
+    st.session_state.audit_name = report["audit_name"] or ""
+    st.session_state.channel = report["channel"] or ""
+    st.session_state.auditor = report["auditor"] or ""
+    st.session_state.audit_date = date.fromisoformat(report["audit_date"])
+    st.session_state.tests = deserialize_tests(report["tests_json"])
+    st.success(f"Relatório de {report['username']} carregado para a tela.")
+
+
+def delete_any_saved_report(report_id: str) -> None:
+    report = fetch_one(
+        """
+        SELECT id
+        FROM saved_reports
+        WHERE id = :id
+        """,
+        {"id": report_id},
+    )
+    if not report:
+        st.error("Relatório selecionado não foi encontrado.")
+        return
+
+    execute_statement(
+        """
+        DELETE FROM saved_reports
+        WHERE id = :id
+        """,
+        {"id": report_id},
+    )
+    st.success("Relatório selecionado excluído pelo administrador.")
 
 
 def database_status() -> dict[str, object]:
     initialize_database()
-    with get_connection() as connection:
-        users = connection.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
-        reports = connection.execute("SELECT COUNT(*) AS total FROM saved_reports").fetchone()["total"]
+    users = fetch_one("SELECT COUNT(*) AS total FROM users")["total"]
+    reports = fetch_one("SELECT COUNT(*) AS total FROM saved_reports")["total"]
+    database_url = get_database_url()
 
     return {
-        "installed": DB_PATH.exists(),
-        "path": str(DB_PATH.resolve()),
+        "installed": True,
+        "path": database_url if database_url.startswith("postgres") else str(DB_PATH.resolve()),
         "users": users,
         "reports": reports,
     }
@@ -974,6 +1128,7 @@ def render_header() -> None:
             st.session_state.authenticated = False
             st.session_state.pending_password_change = False
             st.session_state.current_user = ""
+            st.session_state.current_role = ""
             st.session_state.login_username = ""
             st.rerun()
 
@@ -1243,6 +1398,80 @@ def render_saved_reports() -> None:
             st.error("Senha inválida. Nada foi apagado.")
 
 
+def render_admin_panel() -> None:
+    if st.session_state.get("current_role") != "admin":
+        return
+
+    st.divider()
+    st.subheader("Painel administrador")
+    users = list_all_users()
+    reports = list_all_saved_reports()
+
+    cols = st.columns(3)
+    cols[0].metric("Usuários", len(users))
+    cols[1].metric("Relatórios no banco", len(reports))
+    cols[2].metric("Administradores", sum(1 for user in users if user["role"] == "admin"))
+
+    st.markdown("**Usuários cadastrados**")
+    if users:
+        user_rows = [
+            {
+                "Usuário": user["username"],
+                "Perfil": user["role"],
+                "Troca pendente": "Sim" if user["must_change_password"] else "Não",
+                "Relatórios": user["saved_reports"],
+                "Último login": user["last_login_at"] or "Nunca",
+            }
+            for user in users
+        ]
+        st.dataframe(user_rows, use_container_width=True, hide_index=True)
+    else:
+        st.info("Nenhum usuário cadastrado.")
+
+    st.markdown("**Relatórios de todos os usuários**")
+    if not reports:
+        st.info("Nenhum relatório salvo por usuários.")
+        return
+
+    for report in reports:
+        with st.container(border=True):
+            created_at = datetime.fromisoformat(report["created_at"]).strftime("%d/%m/%Y %H:%M")
+            st.markdown(
+                f"**{report['audit_name'] or 'Sem nome'}**  \n"
+                f"Usuário: {report['username']}  \n"
+                f"Canal: {report['channel'] or 'Não informado'}  \n"
+                f"Data do teste: {date.fromisoformat(report['audit_date']).strftime('%d/%m/%Y')}  \n"
+                f"Salvo em: {created_at}"
+            )
+            action_cols = st.columns(2)
+            with action_cols[0]:
+                st.button(
+                    "Carregar relatório",
+                    key=f"admin_load_saved_{report['id']}",
+                    use_container_width=True,
+                    on_click=load_any_saved_report,
+                    args=(report["id"],),
+                )
+            with action_cols[1]:
+                with st.form(f"admin_delete_saved_form_{report['id']}"):
+                    admin_password = st.text_input(
+                        "Senha admin para excluir",
+                        type="password",
+                        key=f"admin_delete_saved_password_{report['id']}",
+                    )
+                    submitted = st.form_submit_button(
+                        "Excluir relatório",
+                        use_container_width=True,
+                    )
+
+                if submitted:
+                    if verify_current_password(admin_password):
+                        delete_any_saved_report(report["id"])
+                        st.rerun()
+                    else:
+                        st.error("Senha admin inválida. Relatório não foi apagado.")
+
+
 def main() -> None:
     init_state()
 
@@ -1269,6 +1498,7 @@ def main() -> None:
 
     st.divider()
     render_saved_reports()
+    render_admin_panel()
 
 
 if __name__ == "__main__":
