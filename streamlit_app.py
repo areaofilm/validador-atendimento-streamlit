@@ -64,6 +64,16 @@ def get_admin_credentials() -> tuple[str, str]:
     return username, password
 
 
+def get_initial_password_for_user(username: str) -> str:
+    app_username, app_password = get_credentials()
+    admin_username, admin_password = get_admin_credentials()
+    if username == admin_username:
+        return admin_password
+    if username == app_username:
+        return app_password
+    return ""
+
+
 def get_database_url() -> str:
     database_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", "")
     if database_url.startswith("postgres://"):
@@ -177,6 +187,13 @@ def create_default_user(username: str, password: str, role: str) -> None:
     if existing is not None:
         return
 
+    existing_role = fetch_one(
+        "SELECT username FROM users WHERE role = :role LIMIT 1",
+        {"role": role},
+    )
+    if existing_role is not None:
+        return
+
     now = datetime.now().isoformat(timespec="seconds")
     execute_statement(
         """
@@ -218,6 +235,46 @@ def save_new_password(username: str, password: str) -> None:
             "username": username,
         },
     )
+
+
+def normalize_username(username: str) -> str:
+    return " ".join(username.strip().split())
+
+
+def rename_user(old_username: str, new_username: str) -> None:
+    new_username = normalize_username(new_username)
+    if old_username == new_username:
+        return
+
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_engine().begin() as connection:
+        connection.execute(
+            text(
+                """
+                UPDATE users
+                SET username = :new_username, updated_at = :updated_at
+                WHERE username = :old_username
+                """
+            ),
+            {
+                "new_username": new_username,
+                "old_username": old_username,
+                "updated_at": now,
+            },
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE saved_reports
+                SET username = :new_username
+                WHERE username = :old_username
+                """
+            ),
+            {
+                "new_username": new_username,
+                "old_username": old_username,
+            },
+        )
 
 
 def validate_login(username: str, password: str) -> tuple[bool, bool]:
@@ -323,19 +380,39 @@ def login_screen() -> None:
 
 
 def password_change_screen() -> None:
-    _, initial_password = get_credentials()
     username = st.session_state.get("login_username")
+    initial_password = get_initial_password_for_user(username or "")
 
     with st.container(border=True):
-        st.title("Trocar senha")
-        st.caption("A senha inicial é provisória. Cadastre uma nova senha para liberar o app.")
+        st.title("Primeiro acesso")
+        st.caption("A senha inicial é provisória. Escolha seu usuário definitivo e cadastre uma nova senha.")
 
         with st.form("change_password_form"):
+            new_username = st.text_input(
+                "Novo nome de usuário",
+                value=username or "",
+                help="Este será o usuário usado nos próximos acessos.",
+            )
             new_password = st.text_input("Nova senha", type="password")
             confirm_password = st.text_input("Confirmar nova senha", type="password")
-            submitted = st.form_submit_button("Salvar nova senha", use_container_width=True)
+            submitted = st.form_submit_button("Salvar usuário e senha", use_container_width=True)
 
         if not submitted:
+            return
+
+        normalized_username = normalize_username(new_username)
+        if len(normalized_username) < 3:
+            st.error("O novo usuário precisa ter pelo menos 3 caracteres.")
+            return
+
+        if not username:
+            st.error("Sessão de troca de senha expirada. Faça login novamente.")
+            st.session_state.pending_password_change = False
+            return
+
+        existing_user = get_user(normalized_username)
+        if existing_user and normalized_username != username:
+            st.error("Este usuário já existe. Escolha outro nome.")
             return
 
         if len(new_password) < 8:
@@ -350,19 +427,15 @@ def password_change_screen() -> None:
             st.error("A confirmação não confere com a nova senha.")
             return
 
-        if not username:
-            st.error("Sessão de troca de senha expirada. Faça login novamente.")
-            st.session_state.pending_password_change = False
-            return
-
-        save_new_password(username, new_password)
-        user = get_user(username)
-        st.session_state.current_user = username
+        rename_user(username, normalized_username)
+        save_new_password(normalized_username, new_password)
+        user = get_user(normalized_username)
+        st.session_state.current_user = normalized_username
         st.session_state.current_role = user["role"] if user else "user"
         st.session_state.login_username = ""
         st.session_state.pending_password_change = False
         st.session_state.authenticated = True
-        st.success("Senha alterada com sucesso.")
+        st.success("Usuário e senha alterados com sucesso.")
         st.rerun()
 
 
