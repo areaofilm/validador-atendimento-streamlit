@@ -1212,13 +1212,23 @@ def render_saved_reports() -> None:
                         args=(report["id"],),
                     )
                 with action_cols[1]:
-                    if st.button(
-                        "Excluir relatório",
-                        key=f"delete_saved_{report['id']}",
-                        use_container_width=True,
-                    ):
-                        delete_saved_report(report["id"])
-                        st.rerun()
+                    with st.form(f"delete_saved_form_{report['id']}"):
+                        delete_password = st.text_input(
+                            "Senha para excluir este relatório",
+                            type="password",
+                            key=f"delete_saved_password_{report['id']}",
+                        )
+                        delete_submitted = st.form_submit_button(
+                            "Excluir relatório",
+                            use_container_width=True,
+                        )
+
+                    if delete_submitted:
+                        if verify_current_password(delete_password):
+                            delete_saved_report(report["id"])
+                            st.rerun()
+                        else:
+                            st.error("Senha inválida. Relatório não foi apagado.")
 
     with st.form("clear_saved_reports_form"):
         st.warning("Para limpar os relatórios salvos, confirme sua senha atual.")
