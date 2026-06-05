@@ -459,6 +459,23 @@ def clear_saved_reports() -> None:
     st.success("Relatórios salvos foram limpos do banco local.")
 
 
+def delete_saved_report(report_id: str) -> None:
+    username = st.session_state.get("current_user")
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM saved_reports
+            WHERE id = ? AND username = ?
+            """,
+            (report_id, username),
+        )
+
+    if cursor.rowcount:
+        st.success("Relatório selecionado excluído com sucesso.")
+    else:
+        st.error("Relatório selecionado não foi encontrado.")
+
+
 def database_status() -> dict[str, object]:
     initialize_database()
     with get_connection() as connection:
@@ -1185,13 +1202,23 @@ def render_saved_reports() -> None:
                     f"Data do teste: {date.fromisoformat(report['audit_date']).strftime('%d/%m/%Y')}  \n"
                     f"Salvo em: {created_at}"
                 )
-                st.button(
-                    "Carregar este relatório",
-                    key=f"load_saved_{report['id']}",
-                    use_container_width=True,
-                    on_click=load_saved_report,
-                    args=(report["id"],),
-                )
+                action_cols = st.columns(2)
+                with action_cols[0]:
+                    st.button(
+                        "Carregar relatório",
+                        key=f"load_saved_{report['id']}",
+                        use_container_width=True,
+                        on_click=load_saved_report,
+                        args=(report["id"],),
+                    )
+                with action_cols[1]:
+                    if st.button(
+                        "Excluir relatório",
+                        key=f"delete_saved_{report['id']}",
+                        use_container_width=True,
+                    ):
+                        delete_saved_report(report["id"])
+                        st.rerun()
 
     with st.form("clear_saved_reports_form"):
         st.warning("Para limpar os relatórios salvos, confirme sua senha atual.")
