@@ -279,6 +279,19 @@ def reset_user_password(username: str, temporary_password: str) -> None:
     )
 
 
+def delete_user(username: str) -> None:
+    initialize_database()
+    with get_engine().begin() as connection:
+        connection.execute(
+            text("DELETE FROM saved_reports WHERE username = :username"),
+            {"username": username},
+        )
+        connection.execute(
+            text("DELETE FROM users WHERE username = :username"),
+            {"username": username},
+        )
+
+
 def normalize_username(username: str) -> str:
     return " ".join(username.strip().split())
 
@@ -1544,7 +1557,7 @@ def render_admin_panel() -> None:
         st.info("Nenhum usuário cadastrado.")
 
     st.markdown("**Gerenciar acessos**")
-    manage_cols = st.columns(2)
+    manage_cols = st.columns(3)
     with manage_cols[0]:
         with st.form("admin_create_user_form"):
             st.markdown("Novo usuário provisório")
@@ -1613,6 +1626,46 @@ def render_admin_panel() -> None:
             else:
                 reset_user_password(selected_user, temporary_password)
                 st.success("Senha resetada. No próximo login o usuário deverá escolher novo usuário e senha.")
+                st.rerun()
+
+    with manage_cols[2]:
+        user_options = [user["username"] for user in users]
+        with st.form("admin_delete_user_form"):
+            st.markdown("Excluir usuário")
+            delete_username = st.selectbox(
+                "Usuário",
+                options=user_options,
+                key="admin_delete_username",
+            )
+            delete_user_reports = next(
+                (user["saved_reports"] for user in users if user["username"] == delete_username),
+                0,
+            )
+            st.caption(f"Também serão excluídos {delete_user_reports} relatório(s) deste usuário.")
+            delete_admin_password = st.text_input(
+                "Senha do administrador",
+                type="password",
+                key="admin_delete_user_admin_password",
+            )
+            delete_submitted = st.form_submit_button("Excluir usuário", use_container_width=True)
+
+        if delete_submitted:
+            selected_user_data = next(
+                (user for user in users if user["username"] == delete_username),
+                None,
+            )
+            admin_count = sum(1 for user in users if user["role"] == "admin")
+            if not verify_current_password(delete_admin_password):
+                st.error("Senha admin inválida. Usuário não foi excluído.")
+            elif not selected_user_data:
+                st.error("Selecione um usuário válido.")
+            elif delete_username == st.session_state.get("current_user"):
+                st.error("Você não pode excluir o usuário que está logado agora.")
+            elif selected_user_data["role"] == "admin" and admin_count <= 1:
+                st.error("Não é possível excluir o último administrador.")
+            else:
+                delete_user(delete_username)
+                st.success("Usuário e relatórios vinculados foram excluídos.")
                 st.rerun()
 
     st.markdown("**Relatórios de todos os usuários**")
