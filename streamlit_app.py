@@ -212,6 +212,29 @@ def create_default_user(username: str, password: str, role: str) -> None:
     )
 
 
+def create_user(username: str, password: str, role: str = "user", must_change_password: bool = True) -> None:
+    username = normalize_username(username)
+    now = datetime.now().isoformat(timespec="seconds")
+    execute_statement(
+        """
+        INSERT INTO users (
+            username, password_hash, must_change_password, role, created_at, updated_at
+        )
+        VALUES (
+            :username, :password_hash, :must_change_password, :role, :created_at, :updated_at
+        )
+        """,
+        {
+            "username": username,
+            "password_hash": hash_password(password),
+            "must_change_password": 1 if must_change_password else 0,
+            "role": role,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+
 def get_user(username: str):
     initialize_database()
     return fetch_one(
@@ -231,6 +254,25 @@ def save_new_password(username: str, password: str) -> None:
         """,
         {
             "password_hash": hash_password(password),
+            "updated_at": now,
+            "username": username,
+        },
+    )
+
+
+def reset_user_password(username: str, temporary_password: str) -> None:
+    initialize_database()
+    now = datetime.now().isoformat(timespec="seconds")
+    execute_statement(
+        """
+        UPDATE users
+        SET password_hash = :password_hash,
+            must_change_password = 1,
+            updated_at = :updated_at
+        WHERE username = :username
+        """,
+        {
+            "password_hash": hash_password(temporary_password),
             "updated_at": now,
             "username": username,
         },
@@ -1500,6 +1542,78 @@ def render_admin_panel() -> None:
         st.dataframe(user_rows, use_container_width=True, hide_index=True)
     else:
         st.info("Nenhum usuário cadastrado.")
+
+    st.markdown("**Gerenciar acessos**")
+    manage_cols = st.columns(2)
+    with manage_cols[0]:
+        with st.form("admin_create_user_form"):
+            st.markdown("Novo usuário provisório")
+            new_user = st.text_input("Usuário", key="admin_create_username")
+            new_user_password = st.text_input(
+                "Senha provisória",
+                type="password",
+                key="admin_create_password",
+            )
+            new_user_role = st.selectbox(
+                "Perfil",
+                options=["user", "admin"],
+                format_func=lambda value: "Administrador" if value == "admin" else "Usuário",
+                key="admin_create_role",
+            )
+            admin_password = st.text_input(
+                "Senha do administrador",
+                type="password",
+                key="admin_create_admin_password",
+            )
+            create_submitted = st.form_submit_button("Criar usuário", use_container_width=True)
+
+        if create_submitted:
+            normalized_new_user = normalize_username(new_user)
+            if not verify_current_password(admin_password):
+                st.error("Senha admin inválida. Usuário não foi criado.")
+            elif len(normalized_new_user) < 3:
+                st.error("O usuário precisa ter pelo menos 3 caracteres.")
+            elif len(new_user_password) < 8:
+                st.error("A senha provisória precisa ter pelo menos 8 caracteres.")
+            elif get_user(normalized_new_user):
+                st.error("Este usuário já existe.")
+            else:
+                create_user(normalized_new_user, new_user_password, new_user_role, True)
+                st.success("Usuário criado. No primeiro login ele deverá escolher novo usuário e senha.")
+                st.rerun()
+
+    with manage_cols[1]:
+        user_options = [user["username"] for user in users]
+        with st.form("admin_reset_user_form"):
+            st.markdown("Resetar senha de usuário")
+            selected_user = st.selectbox(
+                "Usuário",
+                options=user_options,
+                key="admin_reset_username",
+            )
+            temporary_password = st.text_input(
+                "Nova senha provisória",
+                type="password",
+                key="admin_reset_password",
+            )
+            reset_admin_password = st.text_input(
+                "Senha do administrador",
+                type="password",
+                key="admin_reset_admin_password",
+            )
+            reset_submitted = st.form_submit_button("Resetar senha", use_container_width=True)
+
+        if reset_submitted:
+            if not verify_current_password(reset_admin_password):
+                st.error("Senha admin inválida. Senha não foi resetada.")
+            elif not selected_user:
+                st.error("Selecione um usuário.")
+            elif len(temporary_password) < 8:
+                st.error("A senha provisória precisa ter pelo menos 8 caracteres.")
+            else:
+                reset_user_password(selected_user, temporary_password)
+                st.success("Senha resetada. No próximo login o usuário deverá escolher novo usuário e senha.")
+                st.rerun()
 
     st.markdown("**Relatórios de todos os usuários**")
     if not reports:
