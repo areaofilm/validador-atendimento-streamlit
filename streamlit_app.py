@@ -776,10 +776,13 @@ def database_status() -> dict[str, object]:
     users = fetch_one("SELECT COUNT(*) AS total FROM users")["total"]
     reports = fetch_one("SELECT COUNT(*) AS total FROM saved_reports")["total"]
     database_url = get_database_url()
+    is_postgres = database_url.startswith("postgres")
 
     return {
         "installed": True,
-        "path": database_url if database_url.startswith("postgres") else str(DB_PATH.resolve()),
+        "path": database_url if is_postgres else str(DB_PATH.resolve()),
+        "backend": "PostgreSQL externo" if is_postgres else "SQLite local temporário",
+        "persistent": is_postgres,
         "users": users,
         "reports": reports,
     }
@@ -1475,10 +1478,18 @@ def render_report() -> None:
 def render_saved_reports() -> None:
     st.subheader("Banco local")
     status = database_status()
-    status_cols = st.columns([0.25, 0.25, 0.5])
+    status_cols = st.columns([0.2, 0.2, 0.2, 0.4])
     status_cols[0].metric("Status", "Instalado" if status["installed"] else "Pendente")
-    status_cols[1].metric("Relatórios salvos", status["reports"])
-    status_cols[2].code(status["path"], language="text")
+    status_cols[1].metric("Tipo", status["backend"])
+    status_cols[2].metric("Relatórios salvos", status["reports"])
+    status_cols[3].code(status["path"], language="text")
+
+    if not status["persistent"]:
+        st.warning(
+            "Este app está usando SQLite local temporário. No Streamlit Cloud, usuários e relatórios "
+            "podem ser perdidos quando o app reiniciar. Configure o secret DATABASE_URL com um "
+            "PostgreSQL externo para deixar os dados permanentes."
+        )
 
     if st.button("Instalar / verificar banco local", use_container_width=True):
         initialize_database()
