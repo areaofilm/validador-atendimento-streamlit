@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 import streamlit as st
 from sqlalchemy import create_engine, text
@@ -43,6 +44,7 @@ LOGO_PATH = Path("logo_Valenet.png")
 PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
 _DATABASE_ENGINE = None
+_DATABASE_INITIALIZED = False
 
 
 st.set_page_config(
@@ -88,10 +90,25 @@ def get_database_url() -> str:
     return f"sqlite:///{DB_PATH.resolve().as_posix()}"
 
 
+def safe_database_label(database_url: str) -> str:
+    if not database_url.startswith("postgres"):
+        return str(DB_PATH.resolve())
+
+    parsed = urlsplit(database_url)
+    host = parsed.hostname or "postgres"
+    database = parsed.path.lstrip("/") or "database"
+    return urlunsplit((parsed.scheme, host, f"/{database}", "", ""))
+
+
 def get_engine():
     global _DATABASE_ENGINE
     if _DATABASE_ENGINE is None:
-        _DATABASE_ENGINE = create_engine(get_database_url(), future=True)
+        _DATABASE_ENGINE = create_engine(
+            get_database_url(),
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=300,
+        )
     return _DATABASE_ENGINE
 
 
@@ -132,6 +149,10 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def initialize_database() -> None:
+    global _DATABASE_INITIALIZED
+    if _DATABASE_INITIALIZED:
+        return
+
     expected_username, initial_password = get_credentials()
     admin_username, admin_password = get_admin_credentials()
     execute_statement(
@@ -174,6 +195,7 @@ def initialize_database() -> None:
 
     create_default_user(expected_username, initial_password, "user")
     create_default_user(admin_username, admin_password, "admin")
+    _DATABASE_INITIALIZED = True
 
 
 def create_default_user(username: str, password: str, role: str) -> None:
@@ -780,7 +802,7 @@ def database_status() -> dict[str, object]:
 
     return {
         "installed": True,
-        "path": database_url if is_postgres else str(DB_PATH.resolve()),
+        "path": safe_database_label(database_url),
         "backend": "PostgreSQL externo" if is_postgres else "SQLite local temporário",
         "persistent": is_postgres,
         "users": users,
