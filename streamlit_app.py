@@ -399,6 +399,8 @@ def init_state() -> None:
         "auditor": "",
         "audit_date": date.today(),
         "editing_id": None,
+        "current_report_id": "",
+        "current_report_owner": "",
         "upload_version": 0,
         "report_saved_message": "",
     }
@@ -526,8 +528,8 @@ def status_label(status: str) -> str:
     return labels.get(status, "Pendente")
 
 
-def calculate_summary() -> dict[str, int]:
-    tests = st.session_state.tests
+def calculate_summary(tests: list[dict[str, object]] | None = None) -> dict[str, int]:
+    tests = st.session_state.tests if tests is None else tests
     conform = sum(1 for item in tests if item["status"] == "conforme")
     non_conform = sum(1 for item in tests if item["status"] == "nao-conforme")
     evaluated = conform + non_conform
@@ -611,29 +613,60 @@ def save_current_report_snapshot() -> None:
         st.error("Faça login novamente para salvar o relatório.")
         return
 
-    execute_statement(
-        """
-        INSERT INTO saved_reports (
-            id, username, audit_name, channel, auditor, audit_date, tests_json, created_at
+    report_id = st.session_state.get("current_report_id")
+    report_owner = st.session_state.get("current_report_owner") or username
+    payload = {
+        "id": report_id or str(uuid.uuid4()),
+        "username": username,
+        "owner": report_owner,
+        "audit_name": st.session_state.audit_name,
+        "channel": st.session_state.channel,
+        "auditor": st.session_state.auditor,
+        "audit_date": st.session_state.audit_date.isoformat(),
+        "tests_json": serialize_tests(st.session_state.tests),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    if report_id:
+        existing = fetch_one(
+            "SELECT id FROM saved_reports WHERE id = :id AND username = :owner",
+            {"id": report_id, "owner": report_owner},
         )
-        VALUES (
-            :id, :username, :audit_name, :channel, :auditor, :audit_date, :tests_json, :created_at
+        if not existing:
+            st.error("Relatório original não encontrado. Nada foi salvo para evitar duplicidade.")
+            return
+
+        execute_statement(
+            """
+            UPDATE saved_reports
+            SET audit_name = :audit_name,
+                channel = :channel,
+                auditor = :auditor,
+                audit_date = :audit_date,
+                tests_json = :tests_json,
+                created_at = :created_at
+            WHERE id = :id AND username = :owner
+            """,
+            payload,
         )
-        """,
-        {
-            "id": str(uuid.uuid4()),
-            "username": username,
-            "audit_name": st.session_state.audit_name,
-            "channel": st.session_state.channel,
-            "auditor": st.session_state.auditor,
-            "audit_date": st.session_state.audit_date.isoformat(),
-            "tests_json": serialize_tests(st.session_state.tests),
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        },
-    )
-    st.session_state.report_saved_message = (
-        "Relatório salvo com sucesso. O formulário foi limpo para iniciar uma nova bateria."
-    )
+        st.session_state.report_saved_message = (
+            "Relatório atualizado com sucesso. O formulário foi limpo para iniciar uma nova bateria."
+        )
+    else:
+        execute_statement(
+            """
+            INSERT INTO saved_reports (
+                id, username, audit_name, channel, auditor, audit_date, tests_json, created_at
+            )
+            VALUES (
+                :id, :username, :audit_name, :channel, :auditor, :audit_date, :tests_json, :created_at
+            )
+            """,
+            payload,
+        )
+        st.session_state.report_saved_message = (
+            "Relatório salvo com sucesso. O formulário foi limpo para iniciar uma nova bateria."
+        )
     clear_current_report()
 
 
@@ -643,6 +676,8 @@ def clear_current_report() -> None:
     st.session_state.auditor = ""
     st.session_state.audit_date = date.today()
     st.session_state.tests = []
+    st.session_state.current_report_id = ""
+    st.session_state.current_report_owner = ""
     reset_form()
 
 
@@ -682,7 +717,9 @@ def load_saved_report(report_id: str) -> None:
     st.session_state.auditor = report["auditor"] or ""
     st.session_state.audit_date = date.fromisoformat(report["audit_date"])
     st.session_state.tests = deserialize_tests(report["tests_json"])
-    st.success("Relatório carregado para a tela.")
+    st.session_state.current_report_id = report["id"]
+    st.session_state.current_report_owner = report["username"]
+    st.session_state.report_saved_message = "Relatório carregado para edição."
 
 
 def clear_saved_reports() -> None:
@@ -715,6 +752,8 @@ def delete_saved_report(report_id: str) -> None:
         """,
         {"id": report_id, "username": username},
     )
+    if st.session_state.get("current_report_id") == report_id:
+        clear_current_report()
     st.success("Relatório selecionado excluído com sucesso.")
 
 
@@ -767,7 +806,9 @@ def load_any_saved_report(report_id: str) -> None:
     st.session_state.auditor = report["auditor"] or ""
     st.session_state.audit_date = date.fromisoformat(report["audit_date"])
     st.session_state.tests = deserialize_tests(report["tests_json"])
-    st.success(f"Relatório de {report['username']} carregado para a tela.")
+    st.session_state.current_report_id = report["id"]
+    st.session_state.current_report_owner = report["username"]
+    st.session_state.report_saved_message = f"Relatório de {report['username']} carregado para edição."
 
 
 def delete_any_saved_report(report_id: str) -> None:
@@ -790,6 +831,8 @@ def delete_any_saved_report(report_id: str) -> None:
         """,
         {"id": report_id},
     )
+    if st.session_state.get("current_report_id") == report_id:
+        clear_current_report()
     st.success("Relatório selecionado excluído pelo administrador.")
 
 
@@ -810,13 +853,27 @@ def database_status() -> dict[str, object]:
     }
 
 
-def report_base_name() -> str:
-    raw_name = st.session_state.audit_name or "testes-whatsapp"
+def safe_report_base_name(raw_name: str | None) -> str:
+    raw_name = raw_name or "testes-whatsapp"
     safe_name = "".join(
         char.lower() if char.isalnum() else "-"
         for char in raw_name
     ).strip("-")
     return safe_name or "testes-whatsapp"
+
+
+def report_base_name() -> str:
+    return safe_report_base_name(st.session_state.audit_name)
+
+
+def make_saved_report_pdf(report: dict[str, object]) -> bytes:
+    return make_pdf_report(
+        audit_name=report["audit_name"] or "",
+        channel=report["channel"] or "",
+        auditor=report["auditor"] or "",
+        audit_date=date.fromisoformat(report["audit_date"]),
+        tests=deserialize_tests(report["tests_json"]),
+    )
 
 
 def executive_reading(summary: dict[str, int]) -> str:
@@ -875,7 +932,19 @@ def draw_pdf_footer(canvas, doc) -> None:
     canvas.restoreState()
 
 
-def make_pdf_report() -> bytes:
+def make_pdf_report(
+    audit_name: str | None = None,
+    channel: str | None = None,
+    auditor: str | None = None,
+    audit_date: date | None = None,
+    tests: list[dict[str, object]] | None = None,
+) -> bytes:
+    audit_name = st.session_state.audit_name if audit_name is None else audit_name
+    channel = st.session_state.channel if channel is None else channel
+    auditor = st.session_state.auditor if auditor is None else auditor
+    audit_date = st.session_state.audit_date if audit_date is None else audit_date
+    tests = st.session_state.tests if tests is None else tests
+
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -919,17 +988,17 @@ def make_pdf_report() -> bytes:
         textColor=colors.HexColor("#465a63"),
     )
 
-    summary = calculate_summary()
+    summary = calculate_summary(tests)
     pending = summary["total"] - summary["conform"] - summary["non_conform"]
     story = [
         Paragraph("Relatorio executivo de validacao", title_style),
         Paragraph("Automacoes de atendimento WhatsApp / call center", styles["Heading3"]),
         Spacer(1, 8),
         Paragraph(
-            f"<b>Bateria:</b> {pdf_text(st.session_state.audit_name)}<br/>"
-            f"<b>Canal:</b> {pdf_text(st.session_state.channel)}<br/>"
-            f"<b>Responsavel:</b> {pdf_text(st.session_state.auditor)}<br/>"
-            f"<b>Data:</b> {st.session_state.audit_date.strftime('%d/%m/%Y')}",
+            f"<b>Bateria:</b> {pdf_text(audit_name)}<br/>"
+            f"<b>Canal:</b> {pdf_text(channel)}<br/>"
+            f"<b>Responsavel:</b> {pdf_text(auditor)}<br/>"
+            f"<b>Data:</b> {audit_date.strftime('%d/%m/%Y')}",
             body_style,
         ),
         Spacer(1, 12),
@@ -988,10 +1057,10 @@ def make_pdf_report() -> bytes:
         ]
     )
 
-    if not st.session_state.tests:
+    if not tests:
         story.append(Paragraph("Nenhum teste cadastrado.", body_style))
     else:
-        for index, test in enumerate(st.session_state.tests, start=1):
+        for index, test in enumerate(tests, start=1):
             header_block = [
                 Paragraph(f"Teste {index}: {pdf_text(test['title'])}", heading_style),
                 Paragraph(
@@ -1404,6 +1473,8 @@ def render_report() -> None:
     if st.session_state.report_saved_message:
         st.success(st.session_state.report_saved_message)
         st.session_state.report_saved_message = ""
+    if st.session_state.current_report_id:
+        st.info("Você está editando um relatório salvo. Ao salvar, ele será atualizado sem duplicar.")
 
     summary = calculate_summary()
     st.write(
@@ -1442,8 +1513,13 @@ def render_report() -> None:
             disabled=not st.session_state.tests,
         )
 
+    save_label = (
+        "Atualizar relatório salvo"
+        if st.session_state.current_report_id
+        else "Salvar relatório no banco local"
+    )
     st.button(
-        "Salvar relatório no banco local",
+        save_label,
         type="primary",
         use_container_width=True,
         disabled=not st.session_state.tests,
@@ -1542,6 +1618,17 @@ def render_saved_reports() -> None:
                         use_container_width=True,
                         on_click=load_saved_report,
                         args=(report["id"],),
+                    )
+                    st.download_button(
+                        "Baixar PDF",
+                        data=make_saved_report_pdf(report),
+                        file_name=(
+                            f"{safe_report_base_name(report['audit_name'])}-"
+                            f"{report['audit_date']}-relatorio-executivo.pdf"
+                        ),
+                        mime="application/pdf",
+                        key=f"download_saved_pdf_{report['id']}",
+                        use_container_width=True,
                     )
                 with action_cols[1]:
                     with st.form(f"delete_saved_form_{report['id']}"):
@@ -1740,6 +1827,17 @@ def render_admin_panel() -> None:
                     use_container_width=True,
                     on_click=load_any_saved_report,
                     args=(report["id"],),
+                )
+                st.download_button(
+                    "Baixar PDF",
+                    data=make_saved_report_pdf(report),
+                    file_name=(
+                        f"{safe_report_base_name(report['audit_name'])}-"
+                        f"{report['audit_date']}-relatorio-executivo.pdf"
+                    ),
+                    mime="application/pdf",
+                    key=f"admin_download_saved_pdf_{report['id']}",
+                    use_container_width=True,
                 )
             with action_cols[1]:
                 with st.form(f"admin_delete_saved_form_{report['id']}"):
