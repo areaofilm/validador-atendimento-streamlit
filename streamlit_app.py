@@ -403,6 +403,7 @@ def init_state() -> None:
         "current_report_owner": "",
         "upload_version": 0,
         "report_saved_message": "",
+        "sub_expected_count": 0,
     }
 
     for key, value in defaults.items():
@@ -557,7 +558,9 @@ def make_csv() -> str:
     writer.writerow(["Não conformes", summary["non_conform"]])
     writer.writerow(["Percentual de conformidade", f'{summary["rate"]}%'])
     writer.writerow([])
-    writer.writerow(["Teste", "Status", "Cenário", "Esperado", "Observações", "Anexos"])
+    writer.writerow(
+        ["Teste", "Status", "Cenário", "Esperado", "Sub respostas esperadas", "Observações", "Anexos"]
+    )
 
     for test in st.session_state.tests:
         attachment_names = ", ".join(
@@ -569,6 +572,7 @@ def make_csv() -> str:
                 status_label(test["status"]),
                 test["scenario"],
                 test["expected"],
+                " | ".join(test.get("sub_expected", [])),
                 test["notes"],
                 attachment_names,
             ]
@@ -1081,6 +1085,16 @@ def make_pdf_report(
                     body_style,
                 )
             )
+            sub_expected = test.get("sub_expected", [])
+            if sub_expected:
+                story.append(Paragraph("<b>Sub respostas esperadas:</b>", body_style))
+                for sub_index, sub_value in enumerate(sub_expected, start=1):
+                    story.append(
+                        Paragraph(
+                            f"{sub_index}. {pdf_text(sub_value)}",
+                            body_style,
+                        )
+                    )
             story.append(
                 Paragraph(
                     f"<b>Observacoes:</b> {pdf_text(test['notes'], 'Nao informado.')}",
@@ -1268,8 +1282,23 @@ def reset_form() -> None:
     st.session_state.editing_id = None
     for key in ("title_input", "scenario_input", "expected_input", "notes_input"):
         st.session_state[key] = ""
+    for index in range(st.session_state.get("sub_expected_count", 0)):
+        st.session_state[f"sub_expected_input_{index}"] = ""
+    st.session_state.sub_expected_count = 0
     st.session_state.status_input = "conforme"
     st.session_state.upload_version += 1
+
+
+def add_sub_expected_field() -> None:
+    st.session_state.sub_expected_count = st.session_state.get("sub_expected_count", 0) + 1
+
+
+def current_sub_expected_values() -> list[str]:
+    return [
+        st.session_state.get(f"sub_expected_input_{index}", "").strip()
+        for index in range(st.session_state.get("sub_expected_count", 0))
+        if st.session_state.get(f"sub_expected_input_{index}", "").strip()
+    ]
 
 
 def uploaded_images() -> list[dict[str, object]]:
@@ -1308,6 +1337,7 @@ def save_test() -> None:
         "title": title,
         "scenario": st.session_state.scenario_input.strip(),
         "expected": st.session_state.expected_input.strip(),
+        "sub_expected": current_sub_expected_values(),
         "notes": st.session_state.notes_input.strip(),
         "status": st.session_state.status_input,
         "attachments": uploaded_images(),
@@ -1340,6 +1370,10 @@ def edit_test(test_id: str) -> None:
     st.session_state.title_input = test["title"]
     st.session_state.scenario_input = test["scenario"]
     st.session_state.expected_input = test["expected"]
+    sub_expected = test.get("sub_expected", [])
+    st.session_state.sub_expected_count = len(sub_expected)
+    for index, value in enumerate(sub_expected):
+        st.session_state[f"sub_expected_input_{index}"] = value
     st.session_state.notes_input = test["notes"]
     st.session_state.status_input = test["status"]
     st.session_state.upload_version += 1
@@ -1420,6 +1454,22 @@ def render_test_form() -> None:
             key="expected_input",
             height=120,
         )
+        plus_cols = st.columns([0.86, 0.14])
+        with plus_cols[1]:
+            st.button(
+                "+",
+                key="add_sub_expected",
+                help="Adicionar subcategoria ou sub resposta esperada",
+                use_container_width=True,
+                on_click=add_sub_expected_field,
+            )
+        for index in range(st.session_state.get("sub_expected_count", 0)):
+            st.text_area(
+                f"Subcategoria / sub resposta esperada {index + 1}",
+                placeholder="Ex.: Se cliente não localizado, bot solicita CPF/CNPJ",
+                key=f"sub_expected_input_{index}",
+                height=90,
+            )
         st.text_area(
             "Observações",
             placeholder="Evidências, horários, prints, falhas ou pontos de melhoria",
@@ -1540,6 +1590,11 @@ def render_report() -> None:
 
             st.write(f"**Cenário:** {test['scenario'] or 'Não informado.'}")
             st.write(f"**Esperado:** {test['expected'] or 'Não informado.'}")
+            sub_expected = test.get("sub_expected", [])
+            if sub_expected:
+                st.write("**Sub respostas esperadas:**")
+                for sub_index, sub_value in enumerate(sub_expected, start=1):
+                    st.write(f"{sub_index}. {sub_value}")
             st.write(f"**Observações:** {test['notes'] or 'Não informado.'}")
 
             attachments = test.get("attachments", [])
