@@ -45,7 +45,7 @@ PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
 _DATABASE_ENGINE = None
 _DATABASE_INITIALIZED = False
-APP_BUILD = "neon-reset-login-fallback-2026-07-14"
+APP_BUILD = "neon-reset-diagnostics-2026-07-14-2"
 
 
 st.set_page_config(
@@ -554,16 +554,15 @@ def login_screen() -> None:
                 st.rerun()
             else:
                 st.error("Usuário ou senha inválidos.")
-                if reset_username or reset_password or reset_version:
-                    typed_username = normalize_username(username)
-                    st.caption(
-                        "Diagnóstico de reset: "
-                        f"usuário configurado={reset_username or '(vazio)'}, "
-                        f"usuário digitado={typed_username or '(vazio)'}, "
-                        f"senha configurada={len(reset_password)} caracteres, "
-                        f"senha digitada={len(password)} caracteres, "
-                        f"versão={reset_version or '(vazia)'}."
-                    )
+                typed_username = normalize_username(username)
+                st.caption(
+                    "Diagnóstico de reset: "
+                    f"usuário configurado={reset_username or '(vazio)'}, "
+                    f"usuário digitado={typed_username or '(vazio)'}, "
+                    f"senha configurada={len(reset_password)} caracteres, "
+                    f"senha digitada={len(password)} caracteres, "
+                    f"versão={reset_version or '(vazia)'}."
+                )
 
         if not expected_username or not expected_password:
             st.warning("Configure APP_USERNAME e APP_PASSWORD nos secrets do Streamlit.")
