@@ -45,10 +45,7 @@ PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
 _DATABASE_ENGINE = None
 _DATABASE_INITIALIZED = False
-APP_BUILD = "admin-recovery-bootstrap-2026-07-14-1"
-RECOVERY_ADMIN_USERNAME = "walace_admin"
-RECOVERY_ADMIN_PASSWORD_HASH = "6150bb431cbe4a22b3fa8e27ea180801$fe467528a5ac71d4e57e4c8732f7b3ba3ea7440a069efa9445ed645673df02c6"
-RECOVERY_ADMIN_VERSION = "2026-07-14-admin-recovery-1"
+APP_BUILD = "admin-recovered-2026-07-14"
 
 
 st.set_page_config(
@@ -226,7 +223,6 @@ def initialize_database() -> None:
     create_default_user(expected_username, initial_password, "user")
     create_default_user(admin_username, admin_password, "admin")
     apply_secret_password_reset()
-    apply_emergency_admin_recovery()
     _DATABASE_INITIALIZED = True
 
 
@@ -347,53 +343,6 @@ def apply_secret_password_reset() -> None:
         return
 
     force_secret_password_reset(username, temporary_password, reset_version)
-
-
-def apply_emergency_admin_recovery() -> None:
-    setting_key = f"admin_recovery:{RECOVERY_ADMIN_USERNAME}"
-    applied = fetch_one(
-        "SELECT value FROM app_settings WHERE key = :key",
-        {"key": setting_key},
-    )
-    if applied and applied["value"] == RECOVERY_ADMIN_VERSION:
-        return
-
-    now = datetime.now().isoformat(timespec="seconds")
-    execute_statement(
-        """
-        INSERT INTO users (
-            username, password_hash, must_change_password, role, created_at, updated_at
-        )
-        VALUES (
-            :username, :password_hash, 1, 'admin', :created_at, :updated_at
-        )
-        ON CONFLICT(username) DO UPDATE SET
-            password_hash = excluded.password_hash,
-            must_change_password = 1,
-            role = 'admin',
-            updated_at = excluded.updated_at
-        """,
-        {
-            "username": RECOVERY_ADMIN_USERNAME,
-            "password_hash": RECOVERY_ADMIN_PASSWORD_HASH,
-            "created_at": now,
-            "updated_at": now,
-        },
-    )
-    execute_statement(
-        """
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES (:key, :value, :updated_at)
-        ON CONFLICT(key) DO UPDATE SET
-            value = excluded.value,
-            updated_at = excluded.updated_at
-        """,
-        {
-            "key": setting_key,
-            "value": RECOVERY_ADMIN_VERSION,
-            "updated_at": now,
-        },
-    )
 
 
 def force_secret_password_reset(username: str, temporary_password: str, reset_version: str) -> None:
