@@ -45,6 +45,7 @@ PBKDF2_ITERATIONS = 390_000
 MAX_IMAGE_SIZE_MB = 5
 _DATABASE_ENGINE = None
 _DATABASE_INITIALIZED = False
+APP_BUILD = "neon-reset-login-fallback-2026-07-14"
 
 
 st.set_page_config(
@@ -76,6 +77,9 @@ def get_reset_request() -> tuple[str, str, str]:
 def get_initial_password_for_user(username: str) -> str:
     app_username, app_password = get_credentials()
     admin_username, admin_password = get_admin_credentials()
+    reset_username, reset_password, _ = get_reset_request()
+    if username == reset_username:
+        return reset_password
     if username == admin_username:
         return admin_password
     if username == app_username:
@@ -331,6 +335,11 @@ def apply_secret_password_reset() -> None:
     if applied and applied["value"] == reset_version:
         return
 
+    force_secret_password_reset(username, temporary_password, reset_version)
+
+
+def force_secret_password_reset(username: str, temporary_password: str, reset_version: str) -> None:
+    setting_key = f"password_reset:{username}"
     if get_user_without_init(username):
         reset_user_password_without_init(username, temporary_password)
     else:
@@ -432,6 +441,18 @@ def rename_user(old_username: str, new_username: str) -> None:
 
 
 def validate_login(username: str, password: str) -> tuple[bool, bool]:
+    username = normalize_username(username)
+    reset_username, reset_password, reset_version = get_reset_request()
+    if (
+        reset_username
+        and reset_password
+        and reset_version
+        and username == reset_username
+        and hmac.compare_digest(password, reset_password)
+    ):
+        force_secret_password_reset(reset_username, reset_password, reset_version)
+        return True, True
+
     user = get_user(username)
     if not user:
         return False, False
@@ -535,6 +556,8 @@ def login_screen() -> None:
 
         if not expected_username or not expected_password:
             st.warning("Configure APP_USERNAME e APP_PASSWORD nos secrets do Streamlit.")
+
+        st.caption(f"Versão: {APP_BUILD}")
 
 
 def password_change_screen() -> None:
