@@ -510,6 +510,7 @@ def init_state() -> None:
 
 def login_screen() -> None:
     expected_username, expected_password = get_credentials()
+    reset_username, reset_password, reset_version = get_reset_request()
 
     st.markdown(
         """
@@ -553,6 +554,16 @@ def login_screen() -> None:
                 st.rerun()
             else:
                 st.error("Usuário ou senha inválidos.")
+                if reset_username or reset_password or reset_version:
+                    typed_username = normalize_username(username)
+                    st.caption(
+                        "Diagnóstico de reset: "
+                        f"usuário configurado={reset_username or '(vazio)'}, "
+                        f"usuário digitado={typed_username or '(vazio)'}, "
+                        f"senha configurada={len(reset_password)} caracteres, "
+                        f"senha digitada={len(password)} caracteres, "
+                        f"versão={reset_version or '(vazia)'}."
+                    )
 
         if not expected_username or not expected_password:
             st.warning("Configure APP_USERNAME e APP_PASSWORD nos secrets do Streamlit.")
