@@ -66,6 +66,13 @@ def get_admin_credentials() -> tuple[str, str]:
     return username, password
 
 
+def get_reset_request() -> tuple[str, str, str]:
+    username = os.getenv("APP_RESET_USERNAME") or st.secrets.get("APP_RESET_USERNAME", "")
+    password = os.getenv("APP_RESET_PASSWORD") or st.secrets.get("APP_RESET_PASSWORD", "")
+    version = os.getenv("APP_RESET_VERSION") or st.secrets.get("APP_RESET_VERSION", "")
+    return normalize_username(username), password, version
+
+
 def get_initial_password_for_user(username: str) -> str:
     app_username, app_password = get_credentials()
     admin_username, admin_password = get_admin_credentials()
@@ -183,6 +190,15 @@ def initialize_database() -> None:
         )
         """
     )
+    execute_statement(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
 
     for alter_sql in (
         "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
@@ -195,6 +211,7 @@ def initialize_database() -> None:
 
     create_default_user(expected_username, initial_password, "user")
     create_default_user(admin_username, admin_password, "admin")
+    apply_secret_password_reset()
     _DATABASE_INITIALIZED = True
 
 
@@ -284,6 +301,66 @@ def save_new_password(username: str, password: str) -> None:
 
 def reset_user_password(username: str, temporary_password: str) -> None:
     initialize_database()
+    now = datetime.now().isoformat(timespec="seconds")
+    execute_statement(
+        """
+        UPDATE users
+        SET password_hash = :password_hash,
+            must_change_password = 1,
+            updated_at = :updated_at
+        WHERE username = :username
+        """,
+        {
+            "password_hash": hash_password(temporary_password),
+            "updated_at": now,
+            "username": username,
+        },
+    )
+
+
+def apply_secret_password_reset() -> None:
+    username, temporary_password, reset_version = get_reset_request()
+    if not username or not temporary_password or not reset_version:
+        return
+
+    setting_key = f"password_reset:{username}"
+    applied = fetch_one(
+        "SELECT value FROM app_settings WHERE key = :key",
+        {"key": setting_key},
+    )
+    if applied and applied["value"] == reset_version:
+        return
+
+    if get_user_without_init(username):
+        reset_user_password_without_init(username, temporary_password)
+    else:
+        create_user(username, temporary_password, role="user", must_change_password=True)
+
+    now = datetime.now().isoformat(timespec="seconds")
+    execute_statement(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (:key, :value, :updated_at)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        {
+            "key": setting_key,
+            "value": reset_version,
+            "updated_at": now,
+        },
+    )
+
+
+def get_user_without_init(username: str):
+    return fetch_one(
+        "SELECT * FROM users WHERE username = :username",
+        {"username": username},
+    )
+
+
+def reset_user_password_without_init(username: str, temporary_password: str) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     execute_statement(
         """
