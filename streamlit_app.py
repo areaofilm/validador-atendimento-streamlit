@@ -1472,7 +1472,7 @@ def save_test() -> None:
             for item in st.session_state.tests
         ]
     else:
-        st.session_state.tests.insert(0, payload)
+        st.session_state.tests.append(payload)
 
     reset_form()
     st.success("Teste salvo.")
